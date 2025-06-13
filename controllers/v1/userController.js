@@ -1,6 +1,6 @@
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import db from "../../config/db";
+import db from "../../config/db.js";
 
 export const register = async (req, res) => {
   try {
