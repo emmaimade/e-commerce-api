@@ -3,7 +3,7 @@ import db from "../../config/db.js";
 export const getProducts = async (req, res) => {
   try {
     const products = await db.query("SELECT * FROM products");
-    if (!products) {
+    if (products.rows.length === 0) {
       return res.status(404).json({ message: "No products found" });
     }
     res.status(200).json({ products: products.rows });
@@ -19,7 +19,7 @@ export const getProduct = async (req, res) => {
     const product = await db.query("SELECT * FROM products WHERE id = $1", [
       productId,
     ]);
-    if (!product) {
+    if (product.rows.length === 0) {
       return res.status(404).json({ message: "Product not found" });
     }
 
@@ -134,7 +134,7 @@ export const deleteProduct = async (req, res) => {
       productId,
     ]);
 
-    if (!product) {
+    if (product.rows.length === 0) {
       return res.status(404).json({ message: "Product not found" });
     }
 
