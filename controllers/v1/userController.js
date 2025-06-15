@@ -16,7 +16,7 @@ export const getUsers = async (req, res) => {
 
 export const getUser = async (req, res) => {
   try {
-    const userId = req.params.id;
+    const userId = req.user.id;
 
     const user = await db.query("SELECT * FROM users WHERE id = $1", [userId]);
     if (!user) {
