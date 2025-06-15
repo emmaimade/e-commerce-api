@@ -207,20 +207,20 @@ export const updateItemQty = async (req, res) => {
         SET quantity = $1, updated_at = NOW()
         WHERE id = $2
         RETURNING *
-    `
+    `;
     await db.query(updateQuery, [quantity, itemId]);
 
     // calculate new item total
     const newItemTotal = quantity * parseFloat(item.price);
 
     res.status(200).json({
-        success: true,
-        message: "Cart updated successfully",
-        data: {
-            item_id: itemId,
-            quantity: quantity,
-            item_total: newItemTotal,
-        }
+      success: true,
+      message: "Cart updated successfully",
+      data: {
+        item_id: itemId,
+        quantity: quantity,
+        item_total: newItemTotal,
+      },
     });
   } catch (err) {
     console.log("Error updating item quantity", err.message);
@@ -228,4 +228,66 @@ export const updateItemQty = async (req, res) => {
   }
 };
 
-export const deleteItem = async (req, res) => {};
+export const deleteItem = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const itemId = req.params.id;
+
+    // check if items exist and belong to user's cart
+    const checkQuery = `
+            SELECT
+            ci.id, ci.cart_id, ci.quantity, p.name, p.price
+            FROM cart_items ci
+            JOIN carts c ON ci.cart_id = c.id
+            JOIN products p ON ci.product_id = p.id
+            WHERE ci.id = $1 AND c.user_id = $2
+        `;
+
+    const checkResult = await db.query(checkQuery, [itemId, userId]);
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "Cart item not found or unauthorized",
+      });
+    }
+
+    const item = checkResult.rows[0];
+
+    // delete item
+    await db.query("DELETE FROM cart_items WHERE id = $1", [itemId]);
+
+    // update cart timestamp
+    await db.query("UPDATE carts SET updated_at = NOW() WHERE id = $1", [
+      item.cart_id,
+    ]);
+
+    // check if cart is now empty
+    const remainingItemsResult = await db.query(
+      "SELECT COUNT(*) as count FROM cart_items WHERE cart_id = $1",
+      [item.cart_id]
+    );
+
+    const isCartEmpty = parseInt(remainingItemsResult.rows[0].count) === 0;
+
+    res.status(200).json({
+      success: true,
+      message: `${item.name} removed from cart`,
+      data: {
+        deleted_item_id: itemId,
+        cart_id: item.cart_id,
+        cart_empty: isCartEmpty,
+        deleted_item: {
+          name: item.name,
+          price: item.price,
+          quantity: item.quantity,
+        },
+      },
+    });
+  } catch (err) {
+    console.log("Error deleting item: ", err.message);
+    res.status(500).json({
+      success: false,
+      error: "Server Error",
+    });
+  }
+};
