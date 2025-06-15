@@ -90,16 +90,34 @@ export const updateProduct = async (req, res) => {
       return res.status(400).json({ message: "No fields to update" });
     }
 
-    // checks if price and inventory_qty are numbers
-    if (isNaN(allowedUpdates.price) || isNaN(allowedUpdates.inventory_qty)) {
-      return res
-        .status(400)
-        .json({ message: "Price and inventory must be numbers" });
+    // checks if price is a number
+    if (allowedUpdates.price) {
+      if (isNaN(allowedUpdates.price)) {
+        return res
+          .status(400)
+          .json({ message: "Price must be a number" });
+      }
+      // checks if price is greater than one
+      if (allowedUpdates.price <= 0) {
+        return res
+          .status(400)
+          .json({ message: "Price must be greater than 0" });
+      }
     }
 
-    // checks if price is greater than one
-    if (allowedUpdates.price <= 0) {
-      return res.status(400).json({ message: "Price must be greater than 0" });
+    // check if inventory_qty is a number
+    if (allowedUpdates.inventory_qty) {
+      if (isNaN(allowedUpdates.inventory_qty)) {
+        return res
+          .status(400)
+          .json({ message: "Inventory must be a number" });
+      }
+      // checks if inventory_qty is greater than one
+      if (allowedUpdates.inventory_qty <= 0) {
+        return res
+          .status(400)
+          .json({ message: "Inventory must be greater than 0" });
+      }
     }
 
     // dynamic sql query
