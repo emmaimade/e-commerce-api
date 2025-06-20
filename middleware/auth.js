@@ -18,7 +18,11 @@ const auth = async (req, res, next) => {
       next();
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({
+      success: false, 
+      message: "Authentication failed",
+      error: err.message 
+    });
   }
 };
 

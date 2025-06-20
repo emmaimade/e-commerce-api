@@ -482,15 +482,6 @@ export const verifyPaymentAdmin = async (req, res) => {
       });
     }
 
-    if (status === "paid") {
-      await db.query(
-        `
-        DELETE FROM cart_items 
-        WHERE cart_id IN (SELECT id from carts WHERE user_id = $1)`,
-        [result.rows[0].user_id]
-      );
-    }
-
     res.status(200).json({
       success: true,
       data: {
