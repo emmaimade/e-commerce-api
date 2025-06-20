@@ -5,7 +5,7 @@ import {
   updateItemQty,
   deleteItem,
 } from "../../controllers/v1/cartController.js";
-import auth from "../../middleware/auth.js";
+import { auth } from "../../middleware/auth.js";
 
 const router = express.Router();
 

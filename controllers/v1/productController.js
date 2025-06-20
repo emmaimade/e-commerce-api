@@ -29,6 +29,10 @@ export const getProduct = async (req, res) => {
   }
 };
 
+// ========================================
+// ADMIN-ONLY PRODUCT CONTROLLERS
+// ========================================
+
 export const addProduct = async (req, res) => {
   try {
     const { name, price, inventory_qty } = req.body;
@@ -93,9 +97,7 @@ export const updateProduct = async (req, res) => {
     // checks if price is a number
     if (allowedUpdates.price) {
       if (isNaN(allowedUpdates.price)) {
-        return res
-          .status(400)
-          .json({ message: "Price must be a number" });
+        return res.status(400).json({ message: "Price must be a number" });
       }
       // checks if price is greater than one
       if (allowedUpdates.price <= 0) {
@@ -108,9 +110,7 @@ export const updateProduct = async (req, res) => {
     // check if inventory_qty is a number
     if (allowedUpdates.inventory_qty) {
       if (isNaN(allowedUpdates.inventory_qty)) {
-        return res
-          .status(400)
-          .json({ message: "Inventory must be a number" });
+        return res.status(400).json({ message: "Inventory must be a number" });
       }
       // checks if inventory_qty is greater than one
       if (allowedUpdates.inventory_qty <= 0) {

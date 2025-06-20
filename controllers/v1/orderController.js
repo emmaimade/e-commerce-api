@@ -234,85 +234,6 @@ export const verifyPayment = async (req, res) => {
   }
 };
 
-// verify payment for admin
-export const verifyPaymentAdmin = async (req, res) => {
-  try {
-    const { reference } = req.params;
-
-    // check if user is admin
-    if (req.user.role !== "admin") {
-      return res.status(403).json({
-        success: false,
-        message: "Admin access required",
-      });
-    }
-
-    // verify payment with paystack
-    const verification = await paystack.transaction.verify(reference);
-
-    if (!verification) {
-      return res.status(400).json({
-        success: false,
-        message: "Payment verification failed",
-      });
-    }
-
-    const { data } = verification;
-    const status = data.status === "success" ? "paid" : "failed";
-    const paymentMethod = data.channel;
-
-    // update order status
-    const updateQuery = `
-      UPDATE orders
-      SET
-        status = $1, 
-        payment_method = $2, 
-        updated_at = now()
-      WHERE payment_ref = $3
-      RETURNING *
-    `;
-
-    const result = await db.query(updateQuery, [
-      status,
-      paymentMethod,
-      reference,
-    ]);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Order not found",
-      });
-    }
-
-    if (status === "paid") {
-      await db.query(
-        `
-        DELETE FROM cart_items 
-        WHERE cart_id IN (SELECT id from carts WHERE user_id = $1)`,
-        [result.rows[0].user_id]
-      );
-    }
-
-    res.status(200).json({
-      success: true,
-      data: {
-        order: result.rows[0],
-        payment_status: status,
-        payment_method: paymentMethod,
-        customer_id: result.rows[0].user_id,
-      },
-    });
-  } catch (err) {
-    console.log("Verify payment error", err);
-    res.status(500).json({
-      success: false,
-      message: "Payment Verification failed",
-      error: err.message,
-    });
-  }
-};
-
 // get all user orders
 export const getOrders = async (req, res) => {
   try {
@@ -410,6 +331,180 @@ export const getOrder = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error getting order",
+      error: err.message,
+    });
+  }
+};
+
+// ========================================
+// ADMIN-ONLY ORDER CONTROLLERS
+// ========================================
+
+// admin get all orders
+export const getOrdersAdmin = async (req, res) => {
+  try {
+    const { page = 1, limit = 10 } = req.query;
+    const offset = (page - 1) * limit;
+
+    const ordersQuery = `
+      SELECT
+        o.*,
+        a.line1, a.city, a.state, a.postal_code, a.country
+      FROM orders o
+      LEFT JOIN addresses a ON o.shipping_address_id = a.id
+      ORDER BY o.placed_at DESC
+      LIMIT $1 OFFSET $2
+    `;
+
+    const orders = await db.query(ordersQuery, [limit, offset]);
+
+    // get order items for each order
+    for (let order of orders.rows) {
+      const itemsQuery = `
+        SELECT
+          oi.*
+          p.name as product_name, p.image_url
+        FROM order_items oi
+        LEFT JOIN products p ON oi.product_id = p.id
+        WHERE oi.order_id = $1
+      `;
+
+      const items = await db.query(itemsQuery, [order.id]);
+      order.items = items.rows;
+    }
+
+    res.status(200).json({
+      success: false,
+      data: orders.rows,
+    });
+  } catch (err) {
+    console.log("Error getting orders", err);
+    res.status(500).json({
+      success: false,
+      message: "Error getting orders",
+      error: err.message,
+    });
+  }
+};
+
+// admin get single order
+export const getOrderAdmin = async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    const orderQuery = `
+      SELECT
+        o.*,
+        a.line1, a.city, a.state, a.postal_code, a.country
+      FROM orders o
+      LEFT JOIN addresses a ON o.shipping_address_id = a.id
+      WHERE o.id = $1
+    `;
+
+    const orderResult = await db.query(orderQuery, [id]);
+
+    if (orderResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found",
+      });
+    }
+
+    const order = orderResult.rows[0];
+
+    // get order items
+    const itemsQuery = `
+      SELECT
+        oi.*
+        p.name as product_name, p.image_url
+      FROM order_items oi
+      LEFT JOIN products p ON oi.product_id = p.id
+      WHERE oi.order_id = $1
+    `;
+
+    const items = await db.query(itemsQuery, [id]);
+    order.items = items.rows;
+
+    res.status(200).json({
+      success: true,
+      data: order,
+    });
+  } catch (err) {
+    console.log("Error getting order", err);
+    res.status(500).json({
+      success: false,
+      message: "Error getting order",
+      error: err.message,
+    });
+  }
+};
+
+// verify payment for admin
+export const verifyPaymentAdmin = async (req, res) => {
+  try {
+    const { reference } = req.params;
+
+    // verify payment with paystack
+    const verification = await paystack.transaction.verify(reference);
+
+    if (!verification) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment verification failed",
+      });
+    }
+
+    const { data } = verification;
+    const status = data.status === "success" ? "paid" : "failed";
+    const paymentMethod = data.channel;
+
+    // update order status
+    const updateQuery = `
+      UPDATE orders
+      SET
+        status = $1, 
+        payment_method = $2, 
+        updated_at = now()
+      WHERE payment_ref = $3
+      RETURNING *
+    `;
+
+    const result = await db.query(updateQuery, [
+      status,
+      paymentMethod,
+      reference,
+    ]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found",
+      });
+    }
+
+    if (status === "paid") {
+      await db.query(
+        `
+        DELETE FROM cart_items 
+        WHERE cart_id IN (SELECT id from carts WHERE user_id = $1)`,
+        [result.rows[0].user_id]
+      );
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        order: result.rows[0],
+        payment_status: status,
+        payment_method: paymentMethod,
+        customer_id: result.rows[0].user_id,
+      },
+    });
+  } catch (err) {
+    console.log("Verify payment error", err);
+    res.status(500).json({
+      success: false,
+      message: "Payment Verification failed",
       error: err.message,
     });
   }

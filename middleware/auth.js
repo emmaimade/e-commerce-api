@@ -22,4 +22,29 @@ const auth = async (req, res, next) => {
   }
 };
 
-export default auth;
+const adminAuth = async (req, res, next) => {
+  try {
+    // verify user is authenticated
+    await auth(req, res, () => {});
+
+    // check if user is an admin
+    if (req.user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Access Denied, Admin privileges required",
+      });
+    }
+
+    // if user is authenticated and is admin, proceed to next middleware/route
+    next();
+  } catch (err) {
+    // if user is not authenticated, return error
+    res.status(401).json({
+      success: false,
+      message: "Authentication failed",
+      error: err.message,
+    });
+  }
+};
+
+export { auth, adminAuth };
