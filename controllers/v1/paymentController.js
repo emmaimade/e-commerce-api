@@ -137,13 +137,61 @@ export const handleSuccessfulPayment = async (req, res) => {
 
       // Update Product Inventory
     } else {
-        console.log("No pending order found for reference:", reference);
-        console.log("This might mean payment was already verified by user");
+      console.log("No pending order found for reference:", reference);
+      console.log("This might mean payment was already verified by user");
     }
   } catch (err) {
     console.error("Error processing successful payment:", {
       error: err.message,
       stack: err.stack,
     });
+  }
+};
+
+// failed payment handler
+export const handleFailedPayment = async (req, res) => {
+  try {
+    const { reference, gateway_response, customer } = data;
+
+    console.log(" ❌ Processing failed payment:", {
+      reference,
+      reason: gateway_response,
+      customer_email: customer?.email,
+    });
+
+    // Update order status to failed only if it's still pending
+    const updateQuery = `
+            UPDATE orders
+            SET
+                status = 'failed',
+                updated_at = now()
+            WHERE payment_ref = $1 AND status = 'pending'
+            RETURNING *
+        `;
+
+    const result = await db.query(updateQuery, [reference]);
+
+    if (result.rows.length > 0) {
+      const order = result.rows[0];
+      console.log(`Order ${order.id} marked as failed`);
+
+      // Log the failed payment
+      await db.query(
+        `INSERT INTO payment_logs (order_id, payment_reference, status, failure_reason, processed_by, created_at)
+        VALUES ($1, $2, $3, $4, $5, now())
+        ON CONFLICT (payment_reference) DO NOTHING`,
+        [order.id, reference, "failed", gateway_response, "webhook"]
+      );
+    } else {
+        console.log('No pending order found for failed payment reference:', reference);
+    }
+  } catch (err) {
+    console.error(
+      "Error processing failed payment:",
+      {
+        error: err.message,
+        stack: err.stack,
+      }
+    )
   }
 };

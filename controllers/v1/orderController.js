@@ -1,3 +1,4 @@
+import { stat } from "fs";
 import db from "../../config/db.js";
 import PaystackApi from "paystack-api";
 
@@ -208,6 +209,7 @@ export const verifyPayment = async (req, res) => {
     ]);
 
     if (status === "paid") {
+      // Delete cart items
       await db.query(
         `
         DELETE FROM cart_items 
@@ -220,6 +222,18 @@ export const verifyPayment = async (req, res) => {
         `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, created_at) VALUES ($1, $2, $3, $4, $5, $6, now())
         ON CONFLICT (payment_reference) DO NOTHING`,
         [result.rows[0].id, reference, status, result.rows[0].total, paymentMethod, "user"]
+      );
+
+      // Update Product Inventory
+    }
+
+    if (status === "failed") {
+      // Log the failed payment
+      await db.query(
+        `INSERT INTO payment_logs (order_id, payment_reference, status, failure_reason, processed_by, created_at)
+        VALUES ($1, $2, $3, $4, $5, now())
+        ON CONFLICT (payment_reference) DO NOTHING`,
+        [result.rows[0].id, reference, status, data.gateway_response, "user"]
       );
     }
 
@@ -489,12 +503,22 @@ export const verifyPaymentAdmin = async (req, res) => {
       });
     }
 
-    if (result.rows[0].status === "paid") {
+    if (status === "paid") {
       // Log the payment transaction for audit trail
       await db.query(
         `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, created_at) VALUES ($1, $2, $3, $4, $5, $6, now())
         ON CONFLICT (payment_reference) DO NOTHING`,
         [result.rows[0].id, reference, status, result.rows[0].total, paymentMethod, "admin"]
+      );
+    }
+
+    if (status === "failed") {
+      // Log the failed payment
+      await db.query(
+        `INSERT INTO payment_logs (order_id, payment_reference, status, failure_reason, processed_by, created_at)
+        VALUES ($1, $2, $3, $4, $5, now())
+        ON CONFLICT (payment_reference) DO NOTHING`,
+        [result.rows[0].id, reference, status, data.gateway_response, "admin"]
       );
     }
 
