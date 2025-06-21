@@ -77,3 +77,73 @@ export const handleWebhook = async (req, res) => {
     });
   }
 };
+
+// successfull payment handler
+export const handleSuccessfulPayment = async (req, res) => {
+  try {
+    const { reference, channel, amount, customer } = data;
+
+    console.log("Processing successful payment:", {
+      reference,
+      channel,
+      amount: amount / 100, // Convert from kobo to naira
+      customer_email: customer?.email,
+    });
+
+    // Update order status only if it's still pending
+    const updateQuery = `
+            UPDATE orders
+            SET
+                status = 'paid',
+                payment_method = $1,
+                updated_at = now()
+            WHERE payment_ref = $2 AND status = 'pending'
+            RETURNING *
+        `;
+
+    const result = await db.query(updateQuery, [channel, reference]);
+
+    if (result.rows.length > 0) {
+      const order = result.rows[0];
+
+      console.log("Order updated:", {
+        order_id: order.id,
+        user_id: order.user_id,
+        previous_status: "pending",
+        new_status: order.status,
+      });
+
+      // Only clear cart if order was actually updated (was pending)
+      // This prevents clearing cart if user already verified payment
+      const cartClearResult = await db.query(
+        `DELETE FROM cart_items WHERE cart_id IN (SELECT id FROM carts WHERE user_id = $1) AND EXISTS (SELECT 1 FROM cart_items WHERE cart_id IN (SELECT id FROM carts WHERE user_id = $1))`,
+        [order.user_id]
+      );
+
+      if (cartClearResult.rowCount > 0) {
+        console.log(
+          `Cleared ${cartClearResult.rowCount} items from cart for user ${order.user_id}`
+        );
+      } else {
+        console.log("Cart was alredy empty or cleared");
+      }
+
+      // Log the payment transaction for audit trail
+      await db.query(
+        `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, created_at) VALUES ($1, $2, $3, $4, $5, $6, now())
+        ON CONFLICT (payment_reference) DO NOTHING`,
+        [order.id, reference, "paid", amount, channel, "webhook"]
+      );
+
+      // Update Product Inventory
+    } else {
+        console.log("No pending order found for reference:", reference);
+        console.log("This might mean payment was already verified by user");
+    }
+  } catch (err) {
+    console.error("Error processing successful payment:", {
+      error: err.message,
+      stack: err.stack,
+    });
+  }
+};

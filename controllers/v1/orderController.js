@@ -214,6 +214,13 @@ export const verifyPayment = async (req, res) => {
         WHERE cart_id IN (SELECT id from carts WHERE user_id = $1)`,
         [userId]
       );
+
+      // Log the payment transaction for audit trail
+      await db.query(
+        `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, created_at) VALUES ($1, $2, $3, $4, $5, $6, now())
+        ON CONFLICT (payment_reference) DO NOTHING`,
+        [result.rows[0].id, reference, status, result.rows[0].total, paymentMethod, "user"]
+      );
     }
 
     res.status(200).json({
@@ -480,6 +487,15 @@ export const verifyPaymentAdmin = async (req, res) => {
         success: false,
         message: "Order not found",
       });
+    }
+
+    if (result.rows[0].status === "paid") {
+      // Log the payment transaction for audit trail
+      await db.query(
+        `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, created_at) VALUES ($1, $2, $3, $4, $5, $6, now())
+        ON CONFLICT (payment_reference) DO NOTHING`,
+        [result.rows[0].id, reference, status, result.rows[0].total, paymentMethod, "admin"]
+      );
     }
 
     res.status(200).json({
