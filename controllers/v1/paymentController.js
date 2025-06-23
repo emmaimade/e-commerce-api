@@ -136,6 +136,13 @@ export const handleSuccessfulPayment = async (req, res) => {
       );
 
       // Update Product Inventory
+      try {
+        await updateProductInventory(order.id);
+        console.log("Inventory updated successfully");
+      } catch (inventoryError) {
+       console.log("Inventory update failed:", inventoryError.message); 
+      }
+      
     } else {
       console.log("No pending order found for reference:", reference);
       console.log("This might mean payment was already verified by user");
@@ -183,15 +190,67 @@ export const handleFailedPayment = async (req, res) => {
         [order.id, reference, "failed", gateway_response, "webhook"]
       );
     } else {
-        console.log('No pending order found for failed payment reference:', reference);
+      console.log(
+        "No pending order found for failed payment reference:",
+        reference
+      );
     }
   } catch (err) {
-    console.error(
-      "Error processing failed payment:",
-      {
-        error: err.message,
-        stack: err.stack,
+    console.error("Error processing failed payment:", {
+      error: err.message,
+      stack: err.stack,
+    });
+  }
+};
+
+export const updateProductInventory = async (orderId) => {
+  try {
+    console.log(`Updating inventory for ORDER ID: ${orderId}`);
+
+    const orderItemsQuery = `
+            SELECT
+                oi.product_id,
+                oi.quantity as ordered_quantity
+                p.name as product_name
+                p.inventory_qty as current_stock
+            FROM order_items oi
+            JOIN products p ON oi.product_id = p.id
+            WHERE oi.order_id = $1
+        `;
+
+    const orderItemsResult = await db.query(orderItemsQuery, [orderId]);
+
+    if (orderItemsResult.rows.length === 0) {
+      console.log(`No order items found for ORDER ID: ${orderId}`);
+      return;
+    }
+
+    for (const item of orderItemsResult.rows) {
+      const { product_id, ordered_quantity, product_name, current_stock } =
+        item;
+      const newStockQuantity = Math.max(0, current_stock - ordered_quantity);
+
+      await db.query(
+        `UPDATE products
+        SET inventory_qty = $1, updated_at = now()
+        WHERE id = $2`,
+        [newStockQuantity, product_id]
+      );
+
+      console.log(`Updated inventory for ${product_name}: ${current_stock} -> ${newStockQuantity}`);
+
+      if (newStockQuantity === 0) {
+        await db.query(`UPDATE products SET status = 'out_of_stock' WHERE id = $1`, [product_id]);
+
+        console.log(`Product ${product_name} is now out of stock`);
       }
-    )
+
+      console.log(`Updated inventory successfully for order ${orderId}`)
+    }
+  } catch (err) {
+    console.error("Error updating product inventory:", {
+      error: err.message,
+      stack: err.stack,
+    });
   }
 };
