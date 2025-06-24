@@ -1,6 +1,7 @@
-import { stat } from "fs";
-import db from "../../config/db.js";
 import PaystackApi from "paystack-api";
+
+import db from "../../config/db.js";
+import { updateProductInventory } from "./paymentController.js";
 
 const paystack = PaystackApi(process.env.PAYSTACK_SECRET_KEY);
 
@@ -177,6 +178,15 @@ export const verifyPayment = async (req, res) => {
       });
     }
 
+    // check if payment has already been verified
+    const order = orderCheck.rows[0];
+    if (order.status === "paid") {
+      return res.status(400).json({
+        success: false,
+        message: "Payment has already been verified",
+      });
+    }
+
     // verify payment with paystack
     const verification = await paystack.transaction.verify(reference);
 
@@ -184,6 +194,7 @@ export const verifyPayment = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Payment verification failed",
+        error: verification.message || "Unknown verification error"
       });
     }
 
@@ -221,10 +232,23 @@ export const verifyPayment = async (req, res) => {
       await db.query(
         `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, created_at) VALUES ($1, $2, $3, $4, $5, $6, now())
         ON CONFLICT (payment_reference) DO NOTHING`,
-        [result.rows[0].id, reference, status, result.rows[0].total, paymentMethod, "user"]
+        [
+          result.rows[0].id,
+          reference,
+          status,
+          result.rows[0].total,
+          paymentMethod,
+          "user",
+        ]
       );
 
       // Update Product Inventory
+      try {
+        await updateProductInventory(result.rows[0].id);
+        console.log("Inventory updated successfully");
+      } catch (inventoryError) {
+        console.log("Inventory update failed:", inventoryError.message);
+      }
     }
 
     if (status === "failed") {
@@ -465,6 +489,27 @@ export const verifyPaymentAdmin = async (req, res) => {
   try {
     const { reference } = req.params;
 
+    // Input validation
+    if (!reference || typeof reference !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid payment reference",
+      });
+    }
+
+    // check for duplicate processing - prevent re-processing already successful payment
+    const existingOrder = await db.query(
+      "SELECT status FROM orders WHERE payment_ref = $1",
+      [reference]
+    );
+
+    if (existingOrder.rows[0]?.status === "paid") {
+      return res.status(409).json({
+        success: false,
+        message: "Payment already processed successfully",
+      });
+    }
+
     // verify payment with paystack
     const verification = await paystack.transaction.verify(reference);
 
@@ -472,6 +517,7 @@ export const verifyPaymentAdmin = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Payment verification failed",
+        error: verification.message || "Unknown verification error",
       });
     }
 
@@ -486,7 +532,7 @@ export const verifyPaymentAdmin = async (req, res) => {
         status = $1, 
         payment_method = $2, 
         updated_at = now()
-      WHERE payment_ref = $3
+      WHERE payment_ref = $3 AND status = 'pending'
       RETURNING *
     `;
 
@@ -499,17 +545,33 @@ export const verifyPaymentAdmin = async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: "Order not found",
+        message: "Order not found or already processed",
       });
     }
 
     if (status === "paid") {
       // Log the payment transaction for audit trail
       await db.query(
-        `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, created_at) VALUES ($1, $2, $3, $4, $5, $6, now())
+        `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, created_at) 
+        VALUES ($1, $2, $3, $4, $5, $6, now())
         ON CONFLICT (payment_reference) DO NOTHING`,
-        [result.rows[0].id, reference, status, result.rows[0].total, paymentMethod, "admin"]
+        [
+          result.rows[0].id,
+          reference,
+          status,
+          result.rows[0].total,
+          paymentMethod,
+          "admin",
+        ]
       );
+
+      // update product inventory
+      try {
+        await updateProductInventory(result.rows[0].id);
+        console.log("Inventory updated successfully");
+      } catch (inventoryError) {
+        console.log("Inventory update failed:", inventoryError.message);
+      }
     }
 
     if (status === "failed") {
@@ -529,6 +591,10 @@ export const verifyPaymentAdmin = async (req, res) => {
         payment_status: status,
         payment_method: paymentMethod,
         customer_id: result.rows[0].user_id,
+        verification_type: "manual",
+        verified_by: "admin",
+        verified_at: new Date().toISOString(),
+        admin_id: req.user.id
       },
     });
   } catch (err) {
