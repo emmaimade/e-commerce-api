@@ -92,7 +92,7 @@ export const createOrder = async (req, res) => {
     // initialize paystack payment
     const paymentData = {
       email: req.user.email,
-      amount: total * 100,
+      amount: total * 100, // convert to kobo
       reference: `order-${order.id}-${Date.now()}`,
       callback_url: `${process.env.BASE_URL}/payment/callback?reference=order-${
         order.id
