@@ -78,7 +78,7 @@ export const handleWebhook = async (req, res) => {
   }
 };
 
-// successfull payment handler
+// successful payment handler
 export const handleSuccessfulPayment = async (req, res) => {
   try {
     const { reference, channel, amount, customer } = data;
@@ -142,7 +142,7 @@ export const handleSuccessfulPayment = async (req, res) => {
       } catch (inventoryError) {
        console.log("Inventory update failed:", inventoryError.message); 
       }
-      
+
     } else {
       console.log("No pending order found for reference:", reference);
       console.log("This might mean payment was already verified by user");
@@ -203,10 +203,12 @@ export const handleFailedPayment = async (req, res) => {
   }
 };
 
+// update product inventory
 export const updateProductInventory = async (orderId) => {
   try {
     console.log(`Updating inventory for ORDER ID: ${orderId}`);
 
+    // get order items
     const orderItemsQuery = `
             SELECT
                 oi.product_id,
@@ -254,3 +256,95 @@ export const updateProductInventory = async (orderId) => {
     });
   }
 };
+
+// get payment status
+export const getPaymentStatus = async (req, res) => {
+    try {
+        const { reference } = req.body;
+        const userId = req.user?.id;
+
+        // Input validation
+        if (!reference) {
+            return  res.status(400).json({
+                success: false,
+                message: "Payment reference is required"
+            });
+        }
+
+        let query =`
+            SELECT
+                o.id,
+                o.status,
+                o.payment_method,
+                o.total,
+                o.placed_at
+                o.updated_at
+                o.payment_ref,
+                u.email as customer_email,
+                COUNT (oi.id) as item_count
+            FROM orders o
+            LEFT JOIN users u ON o.user_id = u.id
+            LEFT JOIN order_items oi ON o.id = oi.order_id
+            WHERE o.payment_ref =$1
+        `;
+
+        const queryParams = [reference];
+
+        // If user is authenticated, ensure they can only see their own orders
+        if (userId) {
+            query += ' AND o.user_id = $2';
+            queryParams.push(userId);
+        }
+
+        query += ' GROUP BY o.id, u.email ORDER BY o.placed_at DESC';
+
+        const result = await db.query(query, queryParams);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Payment reference not found or access denied"
+            });
+        }
+
+        const orderData = result.rows[0];
+
+        // get payment logs for this reference
+        const logsQuery = `
+            SELECT
+                status,
+                processed_by,
+                created_at,
+                failure_reason,
+                paystack_response
+            FROM payment_logs
+            WHERE payment_reference = $1
+            ORDER BY created_at DESC
+            LIMIT 5
+        `;
+
+        const logsResult = await db.query(logsQuery, [reference]);
+
+        // Set cache control headers
+        if (orderData.status === "paid") {
+            res.set('Cache-Control', 'public', 'max-age=86400'); // 24 hours
+        } else {
+            res.set('Cache-Control', 'no-cache'); // Pending orders should not be cached
+        }
+
+        res.status(200).json({
+            success: true,
+            data: {
+                ...orderData,
+                payment_logs: logsResult.rows
+            }
+        })
+    } catch (err) {
+        console.error("Error getting payment status:", err);
+        res.status(500).json({
+            success: false,
+            message: "Failed to get payment status",
+            error: process.env.NODE_ENV === "development" ? err.message : 'Internal server error'
+        });
+    }
+}
