@@ -140,9 +140,8 @@ export const handleSuccessfulPayment = async (req, res) => {
         await updateProductInventory(order.id);
         console.log("Inventory updated successfully");
       } catch (inventoryError) {
-       console.log("Inventory update failed:", inventoryError.message); 
+        console.log("Inventory update failed:", inventoryError.message);
       }
-
     } else {
       console.log("No pending order found for reference:", reference);
       console.log("This might mean payment was already verified by user");
@@ -239,15 +238,20 @@ export const updateProductInventory = async (orderId) => {
         [newStockQuantity, product_id]
       );
 
-      console.log(`Updated inventory for ${product_name}: ${current_stock} -> ${newStockQuantity}`);
+      console.log(
+        `Updated inventory for ${product_name}: ${current_stock} -> ${newStockQuantity}`
+      );
 
       if (newStockQuantity === 0) {
-        await db.query(`UPDATE products SET status = 'out_of_stock' WHERE id = $1`, [product_id]);
+        await db.query(
+          `UPDATE products SET status = 'out_of_stock' WHERE id = $1`,
+          [product_id]
+        );
 
         console.log(`Product ${product_name} is now out of stock`);
       }
 
-      console.log(`Updated inventory successfully for order ${orderId}`)
+      console.log(`Updated inventory successfully for order ${orderId}`);
     }
   } catch (err) {
     console.error("Error updating product inventory:", {
@@ -259,19 +263,19 @@ export const updateProductInventory = async (orderId) => {
 
 // get payment status
 export const getPaymentStatus = async (req, res) => {
-    try {
-        const { reference } = req.body;
-        const userId = req.user?.id;
+  try {
+    const { reference } = req.body;
+    const userId = req.user?.id;
 
-        // Input validation
-        if (!reference) {
-            return  res.status(400).json({
-                success: false,
-                message: "Payment reference is required"
-            });
-        }
+    // Input validation
+    if (!reference) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment reference is required",
+      });
+    }
 
-        let query =`
+    let query = `
             SELECT
                 o.id,
                 o.status,
@@ -288,29 +292,29 @@ export const getPaymentStatus = async (req, res) => {
             WHERE o.payment_ref =$1
         `;
 
-        const queryParams = [reference];
+    const queryParams = [reference];
 
-        // If user is authenticated, ensure they can only see their own orders
-        if (userId) {
-            query += ' AND o.user_id = $2';
-            queryParams.push(userId);
-        }
+    // If user is authenticated, ensure they can only see their own orders
+    if (userId) {
+      query += " AND o.user_id = $2";
+      queryParams.push(userId);
+    }
 
-        query += ' GROUP BY o.id, u.email ORDER BY o.placed_at DESC';
+    query += " GROUP BY o.id, u.email ORDER BY o.placed_at DESC";
 
-        const result = await db.query(query, queryParams);
+    const result = await db.query(query, queryParams);
 
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                message: "Payment reference not found or access denied"
-            });
-        }
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Payment reference not found or access denied",
+      });
+    }
 
-        const orderData = result.rows[0];
+    const orderData = result.rows[0];
 
-        // get payment logs for this reference
-        const logsQuery = `
+    // get payment logs for this reference
+    const logsQuery = `
             SELECT
                 status,
                 processed_by,
@@ -323,28 +327,89 @@ export const getPaymentStatus = async (req, res) => {
             LIMIT 5
         `;
 
-        const logsResult = await db.query(logsQuery, [reference]);
+    const logsResult = await db.query(logsQuery, [reference]);
 
-        // Set cache control headers
-        if (orderData.status === "paid") {
-            res.set('Cache-Control', 'public', 'max-age=86400'); // 24 hours
-        } else {
-            res.set('Cache-Control', 'no-cache'); // Pending orders should not be cached
-        }
-
-        res.status(200).json({
-            success: true,
-            data: {
-                ...orderData,
-                payment_logs: logsResult.rows
-            }
-        })
-    } catch (err) {
-        console.error("Error getting payment status:", err);
-        res.status(500).json({
-            success: false,
-            message: "Failed to get payment status",
-            error: process.env.NODE_ENV === "development" ? err.message : 'Internal server error'
-        });
+    // Set cache control headers
+    if (orderData.status === "paid") {
+      res.set("Cache-Control", "public", "max-age=86400"); // 24 hours
+    } else {
+      res.set("Cache-Control", "no-cache"); // Pending orders should not be cached
     }
-}
+
+    res.status(200).json({
+      success: true,
+      data: {
+        ...orderData,
+        payment_logs: logsResult.rows,
+      },
+    });
+  } catch (err) {
+    console.error("Error getting payment status:", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to get payment status",
+      error:
+        process.env.NODE_ENV === "development"
+          ? err.message
+          : "Internal server error",
+    });
+  }
+};
+
+// Test webhook endpoint for development
+export const testWebhook = async (req, res) => {
+  if (process.env.NODE_ENV === "production") {
+    return res.status(403).json({
+      success: false,
+      message: "Test webhook no available in production",
+    });
+  }
+
+  try {
+    const { reference, event = "charge.success" } = req.body;
+
+    if (!reference) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment reference is required",
+      });
+    }
+
+    // Simulate webhook data
+    const testData = {
+      event,
+      data: {
+        reference,
+        status: event === "charge.success" ? "success" : "failed",
+        amount: 100 * 100, // Convert from naira to kobo
+        channel: "card",
+        gateway_response:
+          event === "charge.failed" ? "Insufficient funds" : "Approved",
+        customer: {
+          email: "test@example.com",
+        },
+      },
+    };
+
+    console.log("Testing webhook with data:", testData);
+
+    if (event === "charge.success") {
+      await handleSuccessfulPayment(testData);
+    } else {
+      await handleFailedPayment(testData);
+    }
+
+    res.json({
+      success: true,
+      message: `Test webhook ${event} processed successfully`,
+      data: testData,
+    });
+  } catch (err) {
+    console.error("Error testing webhook:", err);
+    res.status(500).json({
+      success: false,
+      message: "Test webhook failed",
+      error: err.message,
+    });
+  }
+};
