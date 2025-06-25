@@ -79,7 +79,7 @@ export const handleWebhook = async (req, res) => {
 };
 
 // successful payment handler
-export const handleSuccessfulPayment = async (req, res) => {
+export const handleSuccessfulPayment = async (data) => {
   try {
     const { reference, channel, amount, customer } = data;
 
@@ -155,7 +155,7 @@ export const handleSuccessfulPayment = async (req, res) => {
 };
 
 // failed payment handler
-export const handleFailedPayment = async (req, res) => {
+export const handleFailedPayment = async (data) => {
   try {
     const { reference, gateway_response, customer } = data;
 
@@ -281,8 +281,8 @@ export const getPaymentStatus = async (req, res) => {
                 o.status,
                 o.payment_method,
                 o.total,
-                o.placed_at
-                o.updated_at
+                o.placed_at,
+                o.updated_at,
                 o.payment_ref,
                 u.email as customer_email,
                 COUNT (oi.id) as item_count
@@ -331,7 +331,7 @@ export const getPaymentStatus = async (req, res) => {
 
     // Set cache control headers
     if (orderData.status === "paid") {
-      res.set("Cache-Control", "public", "max-age=86400"); // 24 hours
+      res.set("Cache-Control", "public, max-age=86400"); // 24 hours
     } else {
       res.set("Cache-Control", "no-cache"); // Pending orders should not be cached
     }
