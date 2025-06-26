@@ -7,9 +7,13 @@ import productRoutes from './routes/v1/productRoutes.js';
 import cartRoutes from './routes/v1/cartRoutes.js';
 import orderRoutes from './routes/v1/orderRoutes.js';
 import adminRoutes from './routes/v1/adminRoutes.js';
+import paymentRoutes from './routes/v1/paymentRoutes.js';
 
 const app = express();
 const port = process.env.PORT;
+
+// Raw body parser for webhooks before express.json
+app.use('/v1/payments/webhook', express.raw({type: 'application/json'}));
 
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.json());
@@ -18,19 +22,25 @@ app.use(express.json());
 // API ROUTES - GENERAL ENDPOINTS
 // ========================================
 
-// health check
+// Health check
 app.get('/health', (req, res) => {
-    res.send('ok');
+    res.send({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime()
+    });
 })
 
-app.use('/v1/user', userRoutes);
-app.use('/v1/product', productRoutes);
-app.use('/v1/cart', cartRoutes);
-app.use('/v1/order', orderRoutes);
+app.use('/v1/user', userRoutes); // users
+app.use('/v1/product', productRoutes); // products
+app.use('/v1/cart', cartRoutes); // carts
+app.use('/v1/order', orderRoutes); // orders
+app.use('/v1/payments', paymentRoutes); // payments
 
-// admin
+// admin routes
 app.use('/v1/admin', adminRoutes);
 
 app.listen(port, () => {
     console.log(`server is running on http://localhost:${port}`);
+    console.log(`Health Check: http://localhost:${port}/health`);
 })
