@@ -266,6 +266,7 @@ export const getPaymentStatus = async (req, res) => {
   try {
     const { reference } = req.body;
     const userId = req.user?.id;
+    const userRole = req.user?.role;
 
     // Input validation
     if (!reference) {
@@ -273,6 +274,14 @@ export const getPaymentStatus = async (req, res) => {
         success: false,
         message: "Payment reference is required",
       });
+    }
+
+    // check if user is authenticated
+    if (!userId) {
+        return res.status(401).json({
+            success: false,
+            message: "Authentication required"
+        });
     }
 
     let query = `
@@ -294,8 +303,8 @@ export const getPaymentStatus = async (req, res) => {
 
     const queryParams = [reference];
 
-    // If user is authenticated, ensure they can only see their own orders
-    if (userId) {
+    // Regular users can only see their own orders, admins can see any order
+    if (userRole !== "admin") {
       query += " AND o.user_id = $2";
       queryParams.push(userId);
     }
