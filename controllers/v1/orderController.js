@@ -283,8 +283,6 @@ export const verifyPayment = async (req, res) => {
 export const getOrders = async (req, res) => {
   try {
     const userId = req.user.id;
-    const { page = 1, limit = 10 } = req.query;
-    const offset = (page - 1) * limit;
 
     const ordersQuery = `
       SELECT
@@ -294,10 +292,9 @@ export const getOrders = async (req, res) => {
       LEFT JOIN addresses a ON o.shipping_address_id = a.id
       WHERE o.user_id = $1
       ORDER BY o.placed_at DESC
-      LIMIT $2 OFFSET $3
     `;
 
-    const orders = await db.query(ordersQuery, [userId, limit, offset]);
+    const orders = await db.query(ordersQuery, [userId]);
 
     // get order items for each order
     for (let order of orders.rows) {
@@ -333,6 +330,13 @@ export const getOrder = async (req, res) => {
   try {
     const id = req.params.id;
     const userId = req.user.id;
+
+    if (!id || typeof id !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid order id",
+      });
+    }
 
     const orderQuery = `
       SELECT
@@ -388,7 +392,8 @@ export const getOrder = async (req, res) => {
 // admin get all orders
 export const getOrdersAdmin = async (req, res) => {
   try {
-    const { page = 1, limit = 10 } = req.query;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
     const offset = (page - 1) * limit;
 
     const ordersQuery = `
@@ -418,9 +423,30 @@ export const getOrdersAdmin = async (req, res) => {
       order.items = items.rows;
     }
 
+    // get total number of orders
+    const countResult = await db.query(`SELECT COUNT(*) as total FROM orders`);
+    const totalOrders = parseInt(countResult.rows[0].total);
+
+    // calculate pagination
+    const totalPages = Math.ceil(totalOrders / limit);
+    const hasNextPage = page < totalPages;
+    const hasPrevPage = page > 1;
+
     res.status(200).json({
-      success: false,
-      data: orders.rows,
+      success: true,
+      data: {
+        orders: orders.rows
+      },
+      pagination: {
+        current_page: page,
+        per_page: limit,
+        total_orders: totalOrders,
+        total_pages: totalPages,
+        has_next_page: hasNextPage,
+        has_prev_page: hasPrevPage,
+        next_page: hasNextPage ? page + 1 : null,
+        prev_page: hasPrevPage ? page - 1 : null
+      }
     });
   } catch (err) {
     console.log("Error getting orders", err);
@@ -436,6 +462,13 @@ export const getOrdersAdmin = async (req, res) => {
 export const getOrderAdmin = async (req, res) => {
   try {
     const id = req.params.id;
+
+    if (!id || typeof id !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid order id",
+      });
+    }
 
     const orderQuery = `
       SELECT
