@@ -155,33 +155,3 @@ export const updateUser = async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 };
-
-// ========================================
-// ADMIN-ONLY USER CONTROLLERS
-// ========================================
-
-export const adminGetUsers = async (req, res) => {
-  try {
-    const users = await db.query("SELECT * FROM users");
-    if (!users) {
-      return res.status(404).json({ message: "No users found" });
-    }
-    res.status(200).json({ users: users.rows });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-export const adminGetUser = async (req, res) => {
-  try {
-    const userId = req.params.id;
-
-    const user = await db.query("SELECT * FROM users WHERE id = $1", [userId]);
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-    res.status(200).json({ user: user.rows[0] });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};

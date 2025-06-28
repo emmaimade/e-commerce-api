@@ -3,19 +3,21 @@ import { adminAuth } from "../../middleware/auth.js";
 import {
   adminGetUser,
   adminGetUsers,
-} from "../../controllers/v1/userController.js";
+} from "../../controllers/v1/adminController.js";
 import {
   getProducts,
   getProduct,
+} from "../../controllers/v1/productController.js";
+import {
   addProduct,
   updateProduct,
   deleteProduct,
-} from "../../controllers/v1/productController.js";
+} from "../../controllers/v1/adminController.js";
 import {
   getOrderAdmin,
   getOrdersAdmin,
   verifyPaymentAdmin,
-} from "../../controllers/v1/orderController.js";
+} from "../../controllers/v1/adminController.js";
 const router = express.Router();
 
 // USERS
