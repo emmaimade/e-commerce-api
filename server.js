@@ -8,6 +8,7 @@ import cartRoutes from './routes/v1/cartRoutes.js';
 import orderRoutes from './routes/v1/orderRoutes.js';
 import adminRoutes from './routes/v1/adminRoutes.js';
 import paymentRoutes from './routes/v1/paymentRoutes.js';
+import { handleUploadErrors } from './middleware/errorHandler.js';
 
 const app = express();
 const port = process.env.PORT;
@@ -39,6 +40,9 @@ app.use('/v1/payments', paymentRoutes); // payments
 
 // admin routes
 app.use('/v1/admin', adminRoutes);
+
+// Multer Error handling
+app.use(handleUploadErrors);
 
 app.listen(port, () => {
     console.log(`server is running on http://localhost:${port}`);
