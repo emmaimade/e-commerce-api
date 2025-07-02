@@ -3,21 +3,18 @@ import { adminAuth } from "../../middleware/auth.js";
 import {
   adminGetUser,
   adminGetUsers,
-} from "../../controllers/v1/adminController.js";
-import {
-  getProducts,
-  getProduct,
-} from "../../controllers/v1/productController.js";
-import {
+  getOrderAdmin,
+  getOrdersAdmin,
+  verifyPaymentAdmin,
   addProduct,
   updateProduct,
   deleteProduct,
 } from "../../controllers/v1/adminController.js";
 import {
-  getOrderAdmin,
-  getOrdersAdmin,
-  verifyPaymentAdmin,
-} from "../../controllers/v1/adminController.js";
+  getProducts,
+  getProduct,
+} from "../../controllers/v1/productController.js";
+import { upload } from "../../middleware/upload.js";
 const router = express.Router();
 
 // USERS
@@ -27,8 +24,8 @@ router.get("/users/:id", adminAuth, adminGetUser);
 // PRODUCTS
 router.get("/products/", adminAuth, getProducts);
 router.get("/products/:id", adminAuth, getProduct);
-router.post("products/", adminAuth, addProduct);
-router.patch("/products/:id", adminAuth, updateProduct);
+router.post("products/", upload.array("images", 5), adminAuth, addProduct);
+router.patch("/products/:id", upload.array("images", 5), adminAuth, updateProduct);
 router.delete("/products/:id", adminAuth, deleteProduct);
 
 // ORDERS
