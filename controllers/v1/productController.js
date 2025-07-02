@@ -6,7 +6,7 @@ export const getProducts = async (req, res) => {
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const offset = (page - 1) * limit;
 
-    // Search and filter parmeters
+    // Search and filter parameters
     const {
       search,
       min_price,
@@ -16,7 +16,7 @@ export const getProducts = async (req, res) => {
     } = req.query;
 
     // Build dynamic query
-    let whereConditions = ["status = active"];
+    let whereConditions = ["status = 'active'"];
     let queryParams = [];
     let paramCount = 0;
 
@@ -48,8 +48,8 @@ export const getProducts = async (req, res) => {
     const sortField = allowedSortFields.includes(sort_by)
       ? sort_by
       : "created_at";
-    const sortDirection = allowedSortOrders.includes(sort_order)
-      ? sort_order
+    const sortDirection = allowedSortOrders.includes(sort_order.toUpperCase())
+      ? sort_order.toUpperCase()
       : "DESC";
 
     const whereClause = whereConditions.join(" AND ");
@@ -73,11 +73,27 @@ export const getProducts = async (req, res) => {
     `;
 
     queryParams.push(limit, offset);
-    const products = await db.query(productsQuery, queryParams);
+    const result = await db.query(productsQuery, queryParams);
 
-    if (products.rows.length === 0) {
-      return res.status(404).json({ message: "No products found" });
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No products found",
+      });
     }
+
+    // Convert product images to array for response
+    const products = result.rows.map((product) => {
+      if (product.images && typeof product.images === "string") {
+        try {
+          product.images = JSON.parse(product.images);
+        } catch (err) {
+          console.warn("Failed to parse images JSON for product", product.id);
+          product.images = [];
+        }
+      }
+      return product;
+    });
 
     // Set cache headers
     const cacheTime = search || min_price || max_price ? 60 : 300; // 1 min for filtered, 5 min for all
@@ -86,7 +102,7 @@ export const getProducts = async (req, res) => {
     res.status(200).json({
       success: true,
       data: {
-        products: products.rows,
+        products: products,
         filters: {
           search: search || null,
           min_price: min_price || null,
@@ -127,14 +143,18 @@ export const getProduct = async (req, res) => {
       });
     }
 
-    const product = await db.query("SELECT * FROM products WHERE id = $1", [
+    const result = await db.query("SELECT * FROM products WHERE id = $1", [
       productId,
     ]);
-    if (product.rows.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({
         success: false,
         message: "Product not found",
       });
+    }
+    const product = result.rows[0];
+    if (product.images) {
+      product.images = JSON.parse(product.images);
     }
 
     // Set cache headers
@@ -143,7 +163,7 @@ export const getProduct = async (req, res) => {
     res.status(200).json({
       success: true,
       data: {
-        product: product.rows[0],
+        product: product,
       },
     });
   } catch (err) {
