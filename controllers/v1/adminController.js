@@ -2,6 +2,7 @@ import PaystackApi from "paystack-api";
 
 import db from "../../config/db.js";
 import { updateProductInventory } from "./paymentController.js";
+import { uploadMultipleToCloudinary, deleteFromCloudinary } from "../../utils/cloudinaryUpload.js";
 
 const paystack = PaystackApi(process.env.PAYSTACK_SECRET_KEY);
 
@@ -45,36 +46,71 @@ export const adminGetUser = async (req, res) => {
 
 export const addProduct = async (req, res) => {
   try {
-    const { name, price, inventory_qty } = req.body;
+    const { name, description, price, inventory_qty } = req.body;
+    let images = [];
 
-    if (!name || !price || !inventory_qty) {
+    if (!name || !description || !price || !inventory_qty) {
       return res.status(400).json({ message: "All fields are required" });
     }
 
-    if (isNaN(price) || isNaN(inventory_qty)) {
+    const priceNum = parseInt(price);
+    const inventoryNum = parseInt(inventory_qty);
+
+    if (isNaN(priceNum) || isNaN(inventoryNum)) {
       return res
         .status(400)
         .json({ message: "Price and inventory must be numbers" });
     }
 
-    if (price <= 0 || inventory_qty <= 0) {
+    if (priceNum <= 0 || inventoryNum <= 0) {
       return res
         .status(400)
         .json({ message: "Price and inventory must be greater than 0" });
     }
 
+    // Upload images to cloudinary
+    if (req.files && req.files.length > 0) {
+      const cloudinaryResult = await uploadMultipleToCloudinary(
+        req.files,
+        "products"
+      );
+
+      images = cloudinaryResult.map((result, index) => ({
+        url: result.secure_url, // For displaying
+        public_id: result.public_id, // For management
+        width: result.width,
+        height: result.height,
+        format: result.format,
+        is_primary: index === 0, // First image is primary
+        display_order: index,
+      }));
+    }
+    console.log(typeof(images));
+
     const newProduct = await db.query(
-      "INSERT INTO products (name, price, inventory_qty) VALUES ($1, $2, $3) RETURNING *",
-      [name, price, inventory_qty]
+      `INSERT INTO products (name, description, price, inventory_qty, images) 
+      VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [name, description, priceNum, inventoryNum, JSON.stringify(images)]
     );
 
+    const product = newProduct.rows[0];
+    // Convert image to array for response
+    if (typeof product.images === "string") {
+      product.images = JSON.parse(product.images);
+    }
+
     res.status(201).json({
+      success: true,
       message: "Product added successfully",
-      product: newProduct.rows[0],
+      product: product,
     });
   } catch (err) {
     console.log("Error adding product", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ 
+        success: false,
+        message: "Error adding product",
+        error: err.message
+     });
   }
 };
 
@@ -83,14 +119,21 @@ export const updateProduct = async (req, res) => {
     const productId = req.params.id;
     const updates = req.body;
 
+    // Get existing product to get current images
+    const existingProduct = await db.query(
+      "SELECT * FROM products WHERE id = $1",
+      [productId]
+    );
+
+    if (existingProduct.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
     // define allowed fields
-    const allowedFields = [
-      "name",
-      "price",
-      "description",
-      "inventory_qty",
-      "image_url",
-    ];
+    const allowedFields = ["name", "price", "description", "inventory_qty"];
     const allowedUpdates = {};
 
     // filter only allowed fields
@@ -100,6 +143,33 @@ export const updateProduct = async (req, res) => {
       }
     }
 
+    // Handle image updates
+    if (req.files && req.files.length > 0) {
+      const currentImages = existingProduct.rows[0].images || [];
+
+      // Upload new images to cloudinary
+      const cloudinaryResult = await uploadMultipleToCloudinary(
+        req.files,
+        "products"
+      );
+
+      const newImages = cloudinaryResult.map((result, index) => ({
+        url: result.secure_url,
+        public_id: result.public_id,
+        width: result.width,
+        height: result.height,
+        format: result.format,
+        is_primary: currentImages.length === 0 && index === 0,
+        display_order: currentImages.length + index,
+      }));
+
+      // Combine existing and new images
+      const updatedImages = [...currentImages, ...newImages];
+      // Convert array to json string
+      allowedUpdates.images = JSON.stringify(updatedImages);
+    }
+
+    // check if there are any updates to make
     if (Object.keys(allowedUpdates).length === 0) {
       return res.status(400).json({ message: "No fields to update" });
     }
@@ -117,8 +187,9 @@ export const updateProduct = async (req, res) => {
       }
     }
 
-    // check if inventory_qty is a number
+    // Validate inventory
     if (allowedUpdates.inventory_qty) {
+      // check if inventory_qty is a number
       if (isNaN(allowedUpdates.inventory_qty)) {
         return res.status(400).json({ message: "Inventory must be a number" });
       }
@@ -144,13 +215,24 @@ export const updateProduct = async (req, res) => {
     // update product
     const result = await db.query(query, [...values, productId]);
 
+    // parse images back to array for response
+    const updatedProduct = result.rows[0];
+    if (updatedProduct.images) {
+        updatedProduct.images = JSON.parse(updatedProduct.images)
+    }
+
     res.status(200).json({
+      success: true,
       message: "Product updated successfully",
-      product: result.rows[0],
+      product: updatedProduct
     });
   } catch (err) {
     console.log("Error updating product", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({
+        success: false,
+        message: "Error updating product", 
+        error: err.message 
+    });
   }
 };
 
