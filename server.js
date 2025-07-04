@@ -45,6 +45,6 @@ app.use('/v1/admin', adminRoutes);
 app.use(handleUploadErrors);
 
 app.listen(port, () => {
-    console.log(`server is running on http://localhost:${port}`);
+    console.log(`Server is running on http://localhost:${port}`);
     console.log(`Health Check: http://localhost:${port}/health`);
 })
