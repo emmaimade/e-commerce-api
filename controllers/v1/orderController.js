@@ -301,7 +301,7 @@ export const getOrders = async (req, res) => {
       const itemsQuery = `
         SELECT
           oi.*
-          p.name as product_name, p.image_url
+          p.name as product_name, p.images
         FROM order_items oi
         LEFT JOIN products p ON oi.product_id = p.id
         WHERE oi.order_id = $1
@@ -362,7 +362,7 @@ export const getOrder = async (req, res) => {
     const itemsQuery = `
       SELECT
         oi.*
-        p.name as product_name, p.image_url
+        p.name as product_name, p.images
       FROM order_items oi
       LEFT JOIN products p ON oi.product_id = p.id
       WHERE oi.order_id = $1

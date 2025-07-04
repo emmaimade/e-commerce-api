@@ -96,7 +96,7 @@ export const getCart = async (req, res) => {
         p.id as product_id, 
         p.name, 
         p.price, 
-        p.image_url, 
+        p.images, 
         (ci.quantity * p.price) as item_total 
         FROM carts c 
         LEFT JOIN cart_items ci ON c.id = ci.cart_id 
@@ -138,7 +138,7 @@ export const getCart = async (req, res) => {
           product_id: item.product_id,
           product_name: item.name,
           product_price: parseFloat(item.price),
-          product_image_url: item.image_url,
+          product_images: item.images,
           quantity: parseInt(item.quantity),
           item_total: parseFloat(item.item_total),
           added_at: item.added_at,

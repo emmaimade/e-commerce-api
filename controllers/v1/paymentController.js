@@ -12,10 +12,10 @@ export const handleWebhook = async (req, res) => {
 
     try {
       // verify webhook signature
-      const secret = process.env.PAYSTACK_WEBHOOK_SECRET;
+      const secret = process.env.PAYSTACK_SECRET_KEY;
 
       if (!secret) {
-        console.error("❌ PAYSTACK_WEBHOOK_SECRET not configured");
+        console.error("❌ PAYSTACK_SECRET_KEY not configured");
         return res.status(500).json({
           success: false,
           message: "Webhook secret not configured",
