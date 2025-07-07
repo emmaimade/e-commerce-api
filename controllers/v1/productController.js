@@ -152,8 +152,10 @@ export const getProduct = async (req, res) => {
         message: "Product not found",
       });
     }
+
     const product = result.rows[0];
-    if (product.images) {
+    // Convert images from string to array if needed
+    if (product.images && typeof product.images === "string") {
       product.images = JSON.parse(product.images);
     }
 
