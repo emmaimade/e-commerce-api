@@ -46,7 +46,7 @@ export const adminGetUser = async (req, res) => {
 
 export const addProduct = async (req, res) => {
   try {
-    const { name, description, price, inventory_qty } = req.body;
+    const { name, description, price, inventory_qty, image_urls } = req.body;
     let images = [];
 
     if (!name || !description || !price || !inventory_qty) {
@@ -68,10 +68,38 @@ export const addProduct = async (req, res) => {
         .json({ message: "Price and inventory must be greater than 0" });
     }
 
-    // Upload images to cloudinary
+    let uploadData = [];
+    
+    // Handle file uploads
     if (req.files && req.files.length > 0) {
+      uploadData = [...uploadData, ...req.files];
+    }
+
+    // Handle URL uploads
+    if (image_urls) {
+      let urls = [];
+
+      if (typeof image_urls === "string") {
+        try {
+          // Try to parse JSON as array
+          urls = JSON.parse(image_urls)
+        } catch {
+          urls = [image_urls];
+        }
+      } else if (Array.isArray(image_urls)) {
+        urls = image_urls;
+      }
+
+      // Validate URLs and Add to uploadData
+      const validUrls = urls.filter(url => typeof url === "string" && url.trim() !== "");
+      uploadData = [...uploadData, ...validUrls];
+    }
+
+    // Upload images to cloudinary
+    if (uploadData.length > 0) {
+      console.log(`Uploading ${uploadData.length} images to Cloudinary...`);
       const cloudinaryResult = await uploadMultipleToCloudinary(
-        req.files,
+        uploadData,
         "products"
       );
 
@@ -143,13 +171,37 @@ export const updateProduct = async (req, res) => {
       }
     }
 
+    const currentImages = existingProduct.rows[0].images || [];
+    let imagesToUpload = [];
+
     // Handle image updates
     if (req.files && req.files.length > 0) {
-      const currentImages = existingProduct.rows[0].images || [];
+      imagesToUpload = [...currentImages, ...req.files];
+    }
 
+    // If image URLs are provided, handle them
+    if (updates.image_urls) {
+      let urls = [];
+
+      if (typeof updates.image_urls === "string") {
+        try {
+          urls = JSON.parse(updates.image_urls);
+        } catch {
+          urls = [updates.image_urls];
+        }
+      } else if (Array.isArray(updates.image_urls)) {
+          urls = updates.image_urls;
+      }
+
+      // Validate URLs and Add to imageToUpdate
+      const validUrls = urls.filter(url => typeof url === "string" && url.trim() !== "");
+      imagesToUpload = [...imagesToUpload, ...validUrls];
+    }
+
+    if (imagesToUpload.length > 0) {
       // Upload new images to cloudinary
       const cloudinaryResult = await uploadMultipleToCloudinary(
-        req.files,
+        imagesToUpload,
         "products"
       );
 
@@ -248,12 +300,45 @@ export const deleteProduct = async (req, res) => {
       return res.status(404).json({ message: "Product not found" });
     }
 
+    let images = product.rows[0].images || [];
+
+    // If images is a string, parse it to an array
+    if (typeof images === "string") {
+      try {
+        images = JSON.parse(images);
+      } catch (err) {
+        console.log("Failed to parse images JSON", err);
+        images = [];
+      }
+    }
+
     await db.query("DELETE FROM products WHERE id = $1", [productId]);
 
-    res.status(200).json({ message: "Product deleted successfully" });
+    // delete images from cloudinary
+    if (images.length > 0) {
+      for (const image of images) {
+        if (image.public_id) {
+          try {
+            await deleteFromCloudinary(image.public_id);
+            console.log(`Deleted image ${image.public_id} from Cloudinary`);
+          } catch (err) {
+            console.error(`Failed to delete image ${image.public_id}:`, err);
+            // Log the error but continue deleting other images
+          }
+        }
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Product deleted successfully",
+    });
   } catch (err) {
     console.log("Error deleting product", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
   }
 };
 
