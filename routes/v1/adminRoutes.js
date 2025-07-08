@@ -24,7 +24,7 @@ router.get("/users/:id", adminAuth, adminGetUser);
 // PRODUCTS
 router.get("/products/", adminAuth, getProducts);
 router.get("/products/:id", adminAuth, getProduct);
-router.post("products/", upload.array("images", 5), adminAuth, addProduct);
+router.post("/products/", upload.array("images", 5), adminAuth, addProduct);
 router.patch("/products/:id", upload.array("images", 5), adminAuth, updateProduct);
 router.delete("/products/:id", adminAuth, deleteProduct);
 
