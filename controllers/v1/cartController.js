@@ -7,14 +7,18 @@ export const addToCart = async (req, res) => {
 
     // checks if quantity is a number
     if (isNaN(quantity)) {
-      return res.status(400).json({ message: "Quantity must be a number" });
+      return res.status(400).json({
+        success: false,
+        message: "Quantity must be a number",
+      });
     }
 
     // checks if quantity is greater than 0
     if (quantity <= 0) {
-      return res
-        .status(400)
-        .json({ message: "Quantity must be greater than 0" });
+      return res.status(400).json({
+        success: false,
+        message: "Quantity must be greater than 0",
+      });
     }
 
     // checks if product exists
@@ -22,14 +26,19 @@ export const addToCart = async (req, res) => {
       productId,
     ]);
     if (product.rows.length === 0) {
-      return res.status(404).json({ message: "Product not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
     }
 
     // checks if quantity is less than inventory
     if (product.rows[0].inventory_qty < quantity) {
-      return res
-        .status(400)
-        .json({ message: "Quantity is greater than inventory" });
+      return res.status(400).json({
+        success: false,
+        message: "Quantity exceeds available inventory",
+        available: product.rows[0].inventory_qty,
+      });
     }
 
     // checks if user has a cart already and if not create one
@@ -62,7 +71,7 @@ export const addToCart = async (req, res) => {
         [quantity, existingItem.rows[0].id]
       );
     } else {
-      // add product to cart
+      // add product to cart_items
       await db.query(
         "INSERT INTO cart_items (cart_id, product_id, quantity) VALUES ($1, $2, $3)",
         [cartId, productId, quantity]
@@ -74,10 +83,17 @@ export const addToCart = async (req, res) => {
       cartId,
     ]);
 
-    res.status(200).json({ message: "Product added to cart successfully" });
+    res.status(200).json({
+      success: true,
+      message: "Product added to cart successfully",
+    });
   } catch (err) {
     console.log("Add to cart error:", err.message);
-    res.status(500).json({ error: "Server Error" });
+    res.status(500).json({
+      success: false,
+      message: "Server Error",
+      error: err.message,
+    });
   }
 };
 
@@ -155,7 +171,11 @@ export const getCart = async (req, res) => {
     });
   } catch (err) {
     console.log("Get cart error:", err.message);
-    res.status(500).json({ error: "Server Error" });
+    res.status(500).json({
+      success: false,
+      message: "Server Error", 
+      error: err.message
+    });
   }
 };
 
@@ -163,7 +183,7 @@ export const updateItemQty = async (req, res) => {
   try {
     const userId = req.user.id;
     const itemId = req.params.id;
-    const quantity = req.body.quantity;
+    const quantity = parseInt(req.body.quantity);
 
     if (!quantity || quantity < 1 || quantity > 99) {
       return res.status(400).json({
@@ -224,7 +244,11 @@ export const updateItemQty = async (req, res) => {
     });
   } catch (err) {
     console.log("Error updating item quantity", err.message);
-    res.status(500).json("Server Error");
+    res.status(500).json({
+      success: false,
+      message: "Server Error",
+      error: err.message,
+    });
   }
 };
 
