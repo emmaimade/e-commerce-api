@@ -296,6 +296,13 @@ export const getOrders = async (req, res) => {
 
     const orders = await db.query(ordersQuery, [userId]);
 
+    if (orders.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No orders found",
+      });
+    }
+
     // get order items for each order
     for (let order of orders.rows) {
       const itemsQuery = `
