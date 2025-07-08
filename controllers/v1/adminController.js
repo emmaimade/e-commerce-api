@@ -379,6 +379,104 @@ export const updateProduct = async (req, res) => {
   }
 };
 
+export const deleteProductImage = async (req, res) => {
+  try {
+    const productId = req.params.id;
+    const { publicId } = req.body;
+
+
+    if (!publicId) {
+      return res.status(400).json({
+        success: false,
+        message: "Public ID is required",
+      });
+    }
+
+    // Check if product exists
+    const productResult = await db.query(
+      "SELECT * FROM products WHERE id = $1",
+      [productId]
+    );
+
+    if (productResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
+    const product = productResult.rows[0];
+
+    // Parse images from product
+    let images = Array.isArray(product.images)
+      ? product.images
+      : JSON.parse(product.images || "[]");
+
+    // Find index of image to be deleted
+    const imageIndex = images.findIndex((img) => img.public_id === publicId);
+
+    if (imageIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        message: "Image not found in product",
+      });
+    }
+
+    const [deletedImage] = images.splice(imageIndex, 1);
+
+    // Handle primary image assignment
+    if (deletedImage.is_primary && images.length > 0) {
+      images[0].is_primary = true;
+    }
+
+    // Update display order
+    images = images.map((img, index) => ({
+      ...img,
+      display_order: index,
+    }));
+
+    // Delete from cloudinary
+    try {
+      await deleteFromCloudinary(publicId);
+      console.log(`Deleted image with publicId ${publicId} from Cloudinary`);
+    } catch (cloudinaryErr) {
+      console.log("Failed to delete image from cloudinary", cloudinaryErr);
+      res.status(500).json({
+        success: false,
+        message: "Failed to delete image from cloudinary",
+        error: cloudinaryErr.message
+      });
+    }
+
+    // Update Database
+    const result = await db.query(
+      `UPDATE products
+      SET images = $1
+      WHERE id = $2
+      RETURNING *`,
+      [JSON.stringify(images), productId]
+    );
+    
+    const updatedProduct = result.rows[0];
+    if (updatedProduct && typeof updatedProduct.images === "string") {
+      updatedProduct.images = JSON.parse(updatedProduct);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Image deleted successfully",
+      product: updatedProduct
+    })
+  } catch (err) {
+    console.log("Failed to delete image", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete image",
+      error: err.message,
+    });
+  }
+};
+
 export const deleteProduct = async (req, res) => {
   try {
     const productId = req.params.id;

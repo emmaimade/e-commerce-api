@@ -8,7 +8,8 @@ import {
   verifyPaymentAdmin,
   addProduct,
   updateProduct,
-  deleteProduct,
+  deleteProductImage,
+  deleteProduct
 } from "../../controllers/v1/adminController.js";
 import {
   getProducts,
@@ -26,6 +27,7 @@ router.get("/products/", adminAuth, getProducts);
 router.get("/products/:id", adminAuth, getProduct);
 router.post("/products/", upload.array("images", 5), adminAuth, addProduct);
 router.patch("/products/:id", upload.array("images", 5), adminAuth, updateProduct);
+router.patch("/products/:id/images", adminAuth, deleteProductImage);
 router.delete("/products/:id", adminAuth, deleteProduct);
 
 // ORDERS
