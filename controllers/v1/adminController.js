@@ -160,23 +160,74 @@ export const updateProduct = async (req, res) => {
       });
     }
 
-    // define allowed fields
+    // Define allowed fields
     const allowedFields = ["name", "price", "description", "inventory_qty"];
     const allowedUpdates = {};
 
-    // filter only allowed fields
+    // Filter only allowed fields
     for (const [key, value] of Object.entries(updates)) {
       if (allowedFields.includes(key) && value !== undefined && value !== "") {
         allowedUpdates[key] = value;
       }
     }
 
-    const currentImages = existingProduct.rows[0].images || [];
+    let currentImages = [];
+    try {
+      const imageData = existingProduct.rows[0].images;
+
+      if (imageData) {
+        if (typeof imageData === "string") {
+          currentImages = JSON.parse(imageData);
+        } else if (Array.isArray(imageData)) {
+          currentImages = imageData;
+        } else {
+          console.warn("Unexpected image data format:", typeof imageData);
+          currentImages = [];
+        }
+      }
+
+      // Check if currentImages is a proper array
+      if (!Array.isArray(currentImages)) {
+        console.warn('Current images is not an array after parsing, resetting to empty array')
+        currentImages = [];
+      }
+    } catch (parseErr) {
+      console.log("Failed to parse current images JSON:", parseErr);
+
+      // Instead of just resetting, let's try to reload from database
+      try {
+        console.log("Attempting to reload product data from database...");
+        const reloadResult = await db.query(
+          "SELECT images FROM products WHERE id = $1",
+          [productId]
+        );
+
+        if (reloadResult.rows.length > 0) {
+          const reloadedImageData = reloadResult.rows[0].images;
+          if (reloadedImageData && typeof reloadedImageData === "string") {
+            currentImages = JSON.parse(reloadedImageData);
+          }
+        }
+      } catch (reloadErr) {
+        console.error("Failed to reload from database:", reloadErr);
+
+        // Don't proceed with the update to avoid data loss
+        return res.status(500).json({
+          success: false,
+          message:
+            "Unable to retrieve current product images. Please try again.",
+          error: "Image data corruption detected",
+        });
+      }
+    }
+    
+    // Initialize images to upload
+    // This will hold both file uploads and image URLs
     let imagesToUpload = [];
 
     // Handle image updates
     if (req.files && req.files.length > 0) {
-      imagesToUpload = [...currentImages, ...req.files];
+      imagesToUpload = [...imagesToUpload, ...req.files];
     }
 
     // If image URLs are provided, handle them
@@ -198,40 +249,12 @@ export const updateProduct = async (req, res) => {
       imagesToUpload = [...imagesToUpload, ...validUrls];
     }
 
-    if (imagesToUpload.length > 0) {
-      // Upload new images to cloudinary
-      const cloudinaryResult = await uploadMultipleToCloudinary(
-        imagesToUpload,
-        "products"
-      );
-
-      const newImages = cloudinaryResult.map((result, index) => ({
-        url: result.secure_url,
-        public_id: result.public_id,
-        width: result.width,
-        height: result.height,
-        format: result.format,
-        is_primary: currentImages.length === 0 && index === 0,
-        display_order: currentImages.length + index,
-      }));
-
-      // Combine existing and new images
-      const updatedImages = [...currentImages, ...newImages];
-      // Convert array to json string
-      allowedUpdates.images = JSON.stringify(updatedImages);
-    }
-
-    // check if there are any updates to make
-    if (Object.keys(allowedUpdates).length === 0) {
-      return res.status(400).json({ message: "No fields to update" });
-    }
-
-    // checks if price is a number
+    // Checks if price is a number
     if (allowedUpdates.price) {
       if (isNaN(allowedUpdates.price)) {
         return res.status(400).json({ message: "Price must be a number" });
       }
-      // checks if price is greater than one
+      // Checks if price is greater than one
       if (allowedUpdates.price <= 0) {
         return res
           .status(400)
@@ -253,31 +276,99 @@ export const updateProduct = async (req, res) => {
       }
     }
 
-    // dynamic sql query
-    const fields = Object.keys(allowedUpdates);
-    const values = Object.values(allowedUpdates);
-    const setClause = fields
-      .map((field, index) => `${field} = $${index + 1}`)
-      .join(", ");
-
-    const query = `UPDATE products SET ${setClause}, updated_at = NOW() WHERE id = $${
-      fields.length + 1
-    } RETURNING *`;
-
-    // update product
-    const result = await db.query(query, [...values, productId]);
-
-    // parse images back to array for response
-    const updatedProduct = result.rows[0];
-    if (updatedProduct.images) {
-        updatedProduct.images = JSON.parse(updatedProduct.images)
+    // Check if there are any updates to make (including images)
+    if (Object.keys(allowedUpdates).length === 0 && imagesToUpload.length === 0) {
+      return res.status(400).json({ 
+        success: false,
+        message: "No fields to update" 
+      });
     }
 
-    res.status(200).json({
-      success: true,
-      message: "Product updated successfully",
-      product: updatedProduct
-    });
+    let uploadedPublicIds = [];
+
+    if (imagesToUpload.length > 0) {
+      try {
+        // Upload new images to cloudinary
+        const cloudinaryResult = await uploadMultipleToCloudinary(
+          imagesToUpload,
+          "products"
+        );
+
+        // Extract public IDs from the upload results for potential cleanup on error
+        uploadedPublicIds = cloudinaryResult.map((result) => result.public_id);
+
+        const newImages = cloudinaryResult.map((result, index) => ({
+          url: result.secure_url,
+          public_id: result.public_id,
+          width: result.width,
+          height: result.height,
+          format: result.format,
+          is_primary: currentImages.length === 0 && index === 0,
+          display_order: currentImages.length + index,
+        }));
+
+        // Combine existing and new images
+        const updatedImages = [...currentImages, ...newImages];
+        // Convert array to json string
+        allowedUpdates.images = JSON.stringify(updatedImages);
+      } catch (uploadErr) {
+        console.error("Upload failed", uploadErr);
+        return res.status(500).json({
+          success: false,
+          message: "Failed to  upload images",
+          error: uploadErr.message,
+        });
+      }
+    }
+  
+    // Database Update
+    try {
+      // Dynamic sql query
+      const fields = Object.keys(allowedUpdates);
+      const values = Object.values(allowedUpdates);
+      const setClause = fields
+        .map((field, index) => `${field} = $${index + 1}`)
+        .join(", ");
+
+      const query = `UPDATE products SET ${setClause}, updated_at = NOW() WHERE id = $${
+        fields.length + 1
+      } RETURNING *`;
+
+      // Update product
+      const result = await db.query(query, [...values, productId]);
+
+      // Parse images back to array for response
+      const updatedProduct = result.rows[0];
+      if (updatedProduct.images && typeof updatedProduct.images === "string") {
+        updatedProduct.images = JSON.parse(updatedProduct.images);
+      }
+
+      res.status(200).json({
+        success: true,
+        message: "Product updated successfully",
+        product: updatedProduct,
+      });
+    } catch (dbErr) {
+      console.error("Database update failed", dbErr);
+
+      // If database update fails, clean up uploaded images
+      if (uploadedPublicIds.length > 0) {
+        // Delete uploaded images individually
+        for (const publicId of uploadedPublicIds) {
+          try {
+            await deleteFromCloudinary(publicId);
+            console.log(`Cleaned up Image: ${publicId}`);
+          } catch (cleanupErr) {
+            console.error(`Failed to cleanup image ${publicId}:`, cleanupErr);
+          }
+        }
+      }
+      res.status(500).json({
+        success: false,
+        message: "Database update failed",
+        error: dbErr.message,
+      });
+    }
   } catch (err) {
     console.log("Error updating product", err);
     res.status(500).json({
