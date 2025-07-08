@@ -384,7 +384,6 @@ export const deleteProductImage = async (req, res) => {
     const productId = req.params.id;
     const { publicId } = req.body;
 
-
     if (!publicId) {
       return res.status(400).json({
         success: false,
@@ -408,9 +407,32 @@ export const deleteProductImage = async (req, res) => {
     const product = productResult.rows[0];
 
     // Parse images from product
-    let images = Array.isArray(product.images)
-      ? product.images
-      : JSON.parse(product.images || "[]");
+    let images = [];
+    try {
+      const imageData = product.images;
+
+      if (typeof imageData === "string") {
+        images = JSON.parse(imageData);
+      } else if (Array.isArray(imageData)) {
+        images = imageData;
+      } else {
+        console.warn('Unexpected image data format:', typeof imageData);
+        images = [];
+      }
+
+      // Check if images is a proper array
+      if (!Array.isArray(images)) {
+        console.warn('Images is not an array after parsing, resetting to empty array');
+        images = [];
+      }
+    } catch (parseErr) {
+      console.error("Failed to parse images JSON:", parseErr);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to parse images JSON",
+        error: parseErr.message,
+      });
+    }
 
     // Find index of image to be deleted
     const imageIndex = images.findIndex((img) => img.public_id === publicId);
@@ -441,32 +463,45 @@ export const deleteProductImage = async (req, res) => {
       console.log(`Deleted image with publicId ${publicId} from Cloudinary`);
     } catch (cloudinaryErr) {
       console.log("Failed to delete image from cloudinary", cloudinaryErr);
-      res.status(500).json({
+      return res.status(500).json({
         success: false,
         message: "Failed to delete image from cloudinary",
-        error: cloudinaryErr.message
+        error: cloudinaryErr.message,
       });
     }
 
     // Update Database
-    const result = await db.query(
+    try {
+      const result = await db.query(
       `UPDATE products
-      SET images = $1
+      SET images = $1, updated_at = NOW()
       WHERE id = $2
       RETURNING *`,
       [JSON.stringify(images), productId]
-    );
-    
-    const updatedProduct = result.rows[0];
-    if (updatedProduct && typeof updatedProduct.images === "string") {
-      updatedProduct.images = JSON.parse(updatedProduct);
-    }
+      );
 
-    res.status(200).json({
-      success: true,
-      message: "Image deleted successfully",
-      product: updatedProduct
-    })
+      const updatedProduct = result.rows[0];
+      if (updatedProduct && typeof updatedProduct.images === "string") {
+        updatedProduct.images = JSON.parse(updatedProduct.images);
+      }
+
+      res.status(200).json({
+        success: true,
+        message: "Image deleted successfully",
+        product: updatedProduct,
+        deletedImage: {
+          public_id: deletedImage.public_id,
+          url: deletedImage.url,
+        }
+      });
+    } catch (dbErr) {
+      console.error("Database update failed", dbErr);
+      res.status(500).json({
+        success: false,
+        message: "Failed to update product after image deletion",
+        error: dbErr.message,
+      });
+    }
   } catch (err) {
     console.log("Failed to delete image", err);
     res.status(500).json({
