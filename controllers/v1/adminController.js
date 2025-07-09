@@ -521,7 +521,10 @@ export const deleteProduct = async (req, res) => {
     ]);
 
     if (product.rows.length === 0) {
-      return res.status(404).json({ message: "Product not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Product not found" 
+      });
     }
 
     let images = product.rows[0].images || [];
@@ -561,7 +564,8 @@ export const deleteProduct = async (req, res) => {
     console.log("Error deleting product", err);
     res.status(500).json({
       success: false,
-      error: err.message,
+      message: "Failed to delete product",
+      error: err.message
     });
   }
 };
