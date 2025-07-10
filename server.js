@@ -8,6 +8,7 @@ import cartRoutes from './routes/v1/cartRoutes.js';
 import orderRoutes from './routes/v1/orderRoutes.js';
 import adminRoutes from './routes/v1/adminRoutes.js';
 import paymentRoutes from './routes/v1/paymentRoutes.js';
+import shippingRoutes from './routes/v1/shippingRoutes.js';
 import { handleUploadErrors } from './middleware/errorHandler.js';
 
 const app = express();
@@ -37,6 +38,7 @@ app.use('/v1/product', productRoutes); // products
 app.use('/v1/cart', cartRoutes); // carts
 app.use('/v1/order', orderRoutes); // orders
 app.use('/v1/payments', paymentRoutes); // payments
+app.use('/v1/shipping', shippingRoutes); // shipping addresses
 
 // admin routes
 app.use('/v1/admin', adminRoutes);
