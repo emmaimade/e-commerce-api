@@ -1,19 +1,49 @@
 import db from "../../config/db.js";
 import crypto from "crypto";
 
-// webhook handler
+// Webhook handler
 export const handleWebhook = async (req, res) => {
+  let parsedBody;
+  let event;
+  let reference;
   try {
+    // Since you're using express.raw(), req.body is a Buffer
+    const rawBody = req.body;
+    if (!rawBody || rawBody.length === 0) {
+      console.error("❌ Empty webhook body received");
+      return res.status(400).json({
+        success: false,
+        message: "Empty request body",
+      });
+    }
+    
+    console.log("Raw body type:", typeof rawBody);
+    console.log("Raw body:", rawBody);
+
+    // Convert Buffer to string and parse JSON
+    try {
+      const bodyString = rawBody.toString('utf8');
+      parsedBody = JSON.parse(bodyString);
+    } catch (parseError) {
+      console.error("❌ Failed to parse webhook body:", parseError);
+      return res.status(400).json({
+        success: false,
+        message: "Invalid JSON body",
+      });
+    }
+
+    event = parsedBody?.event;
+    reference = parsedBody?.data?.reference;
+
     console.log("🔔 Webhook received:", {
-      event: req.body?.event,
-      reference: req.body?.data?.reference,
+      event: event,
+      reference: reference,
       timeStamp: new Date().toISOString(),
     });
 
     try {
-      // verify webhook signature
+      // Verify webhook signature
       const secret = process.env.PAYSTACK_SECRET_KEY;
-
       if (!secret) {
         console.error("❌ PAYSTACK_SECRET_KEY not configured");
         return res.status(500).json({
@@ -24,7 +54,7 @@ export const handleWebhook = async (req, res) => {
 
       const hash = crypto
         .createHmac("sha512", secret)
-        .update(JSON.stringify(req.body))
+        .update(rawBody)
         .digest("hex");
 
       const signature = req.headers["x-paystack-signature"];
@@ -37,11 +67,11 @@ export const handleWebhook = async (req, res) => {
         });
       }
 
-      const { event, data } = req.body;
+      const { data } = parsedBody;
 
       // log the event being processed
       console.log(
-        `Processing webhook event: ${event} for reference: ${data?.reference}`
+        `Processing webhook event: ${event} for reference: ${reference}`
       );
 
       switch (event) {
@@ -62,12 +92,14 @@ export const handleWebhook = async (req, res) => {
       res.status(200).json({
         success: true,
         message: `Webhook ${event} processed successfully`,
+        timestamp: new Date().toISOString(),
       });
     } catch (err) {
       console.error("Webhook processing error:", {
         error: err.message,
         stack: err.stack,
-        body: req.body,
+        event: event,
+        reference: reference,
       });
     }
   } catch (err) {
@@ -78,7 +110,7 @@ export const handleWebhook = async (req, res) => {
   }
 };
 
-// successful payment handler
+// Successful payment handler
 export const handleSuccessfulPayment = async (data) => {
   try {
     const { reference, channel, amount, customer } = data;
@@ -130,9 +162,17 @@ export const handleSuccessfulPayment = async (data) => {
 
       // Log the payment transaction for audit trail
       await db.query(
-        `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, created_at) VALUES ($1, $2, $3, $4, $5, $6, now())
+        `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
         ON CONFLICT (payment_reference) DO NOTHING`,
-        [order.id, reference, "paid", amount, channel, "webhook"]
+        [
+          order.id,
+          reference,
+          "paid",
+          amount / 100, // Convert from kobo to naira
+          channel,
+          "webhook",
+          JSON.stringify(data.gateway_response) || "Payment successful",
+        ]
       );
 
       // Update Product Inventory
@@ -154,7 +194,7 @@ export const handleSuccessfulPayment = async (data) => {
   }
 };
 
-// failed payment handler
+// Failed payment handler
 export const handleFailedPayment = async (data) => {
   try {
     const { reference, gateway_response, customer } = data;
@@ -202,17 +242,17 @@ export const handleFailedPayment = async (data) => {
   }
 };
 
-// update product inventory
+// Update product inventory
 export const updateProductInventory = async (orderId) => {
   try {
     console.log(`Updating inventory for ORDER ID: ${orderId}`);
 
-    // get order items
+    // Get order items
     const orderItemsQuery = `
             SELECT
                 oi.product_id,
-                oi.quantity as ordered_quantity
-                p.name as product_name
+                oi.quantity as ordered_quantity,
+                p.name as product_name,
                 p.inventory_qty as current_stock
             FROM order_items oi
             JOIN products p ON oi.product_id = p.id
@@ -242,29 +282,30 @@ export const updateProductInventory = async (orderId) => {
         `Updated inventory for ${product_name}: ${current_stock} -> ${newStockQuantity}`
       );
 
+      // Update product status if it goes out of stock
       if (newStockQuantity === 0) {
         await db.query(
           `UPDATE products SET status = 'out_of_stock' WHERE id = $1`,
           [product_id]
         );
-
         console.log(`Product ${product_name} is now out of stock`);
       }
-
-      console.log(`Updated inventory successfully for order ${orderId}`);
     }
+
+    console.log(`Updated inventory successfully for order ${orderId}`);
   } catch (err) {
     console.error("Error updating product inventory:", {
       error: err.message,
       stack: err.stack,
+      orderId: orderId,
     });
   }
 };
 
-// get payment status
+// Get payment status
 export const getPaymentStatus = async (req, res) => {
   try {
-    const { reference } = req.body;
+    const { reference } = req.params;
     const userId = req.user?.id;
     const userRole = req.user?.role;
 
@@ -322,21 +363,35 @@ export const getPaymentStatus = async (req, res) => {
 
     const orderData = result.rows[0];
 
-    // get payment logs for this reference
+    // Get payment logs for this reference
     const logsQuery = `
             SELECT
                 status,
                 processed_by,
                 created_at,
                 failure_reason,
-                paystack_response
+                gateway_response
             FROM payment_logs
             WHERE payment_reference = $1
             ORDER BY created_at DESC
-            LIMIT 5
+            LIMIT 10
         `;
 
     const logsResult = await db.query(logsQuery, [reference]);
+
+    // Get order items details
+    const itemsQuery = `
+      SELECT
+        oi.quantity,
+        oi.price,
+        p.name as product_name,
+        p.id as product_id
+      FROM order_items oi
+      JOIN products p ON oi.product_id = p.id
+      WHERE oi.order_id = $1
+    `;
+
+    const itemsResult = await db.query(itemsQuery, [orderData.id]);
 
     // Set cache control headers
     if (orderData.status === "paid") {
@@ -349,7 +404,9 @@ export const getPaymentStatus = async (req, res) => {
       success: true,
       data: {
         ...orderData,
+        items: itemsResult.rows,
         payment_logs: logsResult.rows,
+        last_updated: new Date().toISOString()
       },
     });
   } catch (err) {
@@ -381,6 +438,19 @@ export const testWebhook = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Payment reference is required",
+      });
+    }
+
+    // Check if order exists
+    const orderResult = await db.query(
+      "SELECT * FROM orders WHERE payment_ref = $1",
+      [reference]
+    );
+
+    if (orderResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found for this reference",
       });
     }
 

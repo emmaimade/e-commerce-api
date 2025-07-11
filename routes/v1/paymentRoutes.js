@@ -13,7 +13,7 @@ const router = express.Router();
 router.post("/webhook", handleWebhook);
 
 // Get payment status
-router.post("/status", auth, getPaymentStatus);
+router.get("/status/:reference", auth, getPaymentStatus);
 
 // Test webhook - only available in development
 router.post("/test-webhook", testWebhook);
