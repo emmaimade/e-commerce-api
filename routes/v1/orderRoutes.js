@@ -10,7 +10,7 @@ import { auth } from "../../middleware/auth.js";
 const router = express.Router();
 
 router.post("/", auth, createOrder);
-router.post("/payment/verify", auth, verifyPayment);
+router.get("/payment/verify/:reference", auth, verifyPayment);
 router.get("/", auth, getOrders);
 router.get("/:id", auth, getOrder);
 
