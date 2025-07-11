@@ -33,6 +33,6 @@ router.delete("/products/:id", adminAuth, deleteProduct);
 // ORDERS
 router.get("/orders/", adminAuth, getOrdersAdmin);
 router.get("/orders/:id", adminAuth, getOrderAdmin);
-router.get("/orders/payment/:reference", adminAuth, verifyPaymentAdmin);
+router.post("/orders/payment/verify/", adminAuth, verifyPaymentAdmin);
 
 export default router;

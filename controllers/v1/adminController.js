@@ -1,10 +1,9 @@
-import PaystackApi from "paystack-api";
+import axios from "axios";
 
 import db from "../../config/db.js";
 import { updateProductInventory } from "./paymentController.js";
 import { uploadMultipleToCloudinary, deleteFromCloudinary } from "../../utils/cloudinaryUpload.js";
 
-const paystack = PaystackApi(process.env.PAYSTACK_SECRET_KEY);
 
 // ========================================
 // USER CONTROLLERS
@@ -596,8 +595,8 @@ export const getOrdersAdmin = async (req, res) => {
     for (let order of orders.rows) {
       const itemsQuery = `
         SELECT
-          oi.*
-          p.name as product_name, p.image_url
+          oi.*,
+          p.name as product_name, p.images
         FROM order_items oi
         LEFT JOIN products p ON oi.product_id = p.id
         WHERE oi.order_id = $1
@@ -676,8 +675,8 @@ export const getOrderAdmin = async (req, res) => {
     // get order items
     const itemsQuery = `
       SELECT
-        oi.*
-        p.name as product_name, p.image_url
+        oi.*,
+        p.name as product_name, p.images
       FROM order_items oi
       LEFT JOIN products p ON oi.product_id = p.id
       WHERE oi.order_id = $1
@@ -702,7 +701,7 @@ export const getOrderAdmin = async (req, res) => {
 
 export const verifyPaymentAdmin = async (req, res) => {
   try {
-    const { reference } = req.params;
+    const { reference } = req.body;
 
     // Input validation
     if (!reference || typeof reference !== "string") {
@@ -712,36 +711,68 @@ export const verifyPaymentAdmin = async (req, res) => {
       });
     }
 
-    // check for duplicate processing - prevent re-processing already successful payment
+    // Check if order exists
     const existingOrder = await db.query(
-      "SELECT status FROM orders WHERE payment_ref = $1",
+      "SELECT * FROM orders WHERE payment_ref = $1",
       [reference]
     );
 
-    if (existingOrder.rows[0]?.status === "paid") {
-      return res.status(409).json({
-        success: false,
-        message: "Payment already processed successfully",
-      });
-    }
-
-    // verify payment with paystack
-    const verification = await paystack.transaction.verify(reference);
-
-    if (!verification) {
+    if (existingOrder.rows.length === 0) {
       return res.status(400).json({
         success: false,
-        message: "Payment verification failed",
-        error: verification.message || "Unknown verification error",
+        message: "Payment reference not found",
       });
     }
 
-    const { data } = verification;
-    const status = data.status === "success" ? "paid" : "failed";
-    const paymentMethod = data.channel;
+    const order = existingOrder.rows[0];
 
-    // update order status
-    const updateQuery = `
+    // Check if payment has already been verified
+    if (order.status === "paid") {
+      return res.status(409).json({
+        success: false,
+        message: "Payment already verified",
+        data: {
+          order: order,
+          payment_status: "paid",
+          payment_method: order.payment_method,
+          customer_id: order.user_id,
+          verification_type: "already_processed",
+        },
+      });
+    }
+
+    // Verify payment with paystack
+    try {
+      const verificationResponse = await axios.get(
+        `https://api.paystack.co/transaction/verify/${reference}`,
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      console.log(
+        "Admin Paystack verification response:",
+        verificationResponse.data
+      );
+
+      if (!verificationResponse.data.status) {
+        return res.status(400).json({
+          success: false,
+          message: "Payment verification failed",
+          error:
+            verificationResponse.data.message || "Unknown verification error",
+        });
+      }
+
+      const data = verificationResponse.data.data;
+      const paymentStatus = data.status === "success" ? "paid" : "failed";
+      const paymentMethod = data.channel;
+
+      // update order status
+      const updateQuery = `
       UPDATE orders
       SET
         status = $1, 
@@ -751,67 +782,77 @@ export const verifyPaymentAdmin = async (req, res) => {
       RETURNING *
     `;
 
-    const result = await db.query(updateQuery, [
-      status,
-      paymentMethod,
-      reference,
-    ]);
+      const result = await db.query(updateQuery, [
+        paymentStatus,
+        paymentMethod,
+        reference,
+      ]);
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Order not found or already processed",
-      });
-    }
+      if (paymentStatus === "paid") {
+        // Update product inventory
+        try {
+          await updateProductInventory(result.rows[0].id);
+          console.log("Inventory updated successfully");
+        } catch (inventoryError) {
+          console.log("Inventory update failed:", inventoryError.message);
+        }
 
-    if (status === "paid") {
-      // Log the payment transaction for audit trail
-      await db.query(
-        `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, created_at) 
-        VALUES ($1, $2, $3, $4, $5, $6, now())
-        ON CONFLICT (payment_reference) DO NOTHING`,
-        [
-          result.rows[0].id,
-          reference,
-          status,
-          result.rows[0].total,
-          paymentMethod,
-          "admin",
-        ]
-      );
-
-      // update product inventory
-      try {
-        await updateProductInventory(result.rows[0].id);
-        console.log("Inventory updated successfully");
-      } catch (inventoryError) {
-        console.log("Inventory update failed:", inventoryError.message);
-      }
-    }
-
-    if (status === "failed") {
-      // Log the failed payment
-      await db.query(
-        `INSERT INTO payment_logs (order_id, payment_reference, status, failure_reason, processed_by, created_at)
+        // Log the payment transaction for audit trail
+        await db.query(
+          `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now()) ON CONFLICT (payment_reference) DO NOTHING`,
+          [
+            result.rows[0].id,
+            reference,
+            paymentStatus,
+            result.rows[0].total,
+            paymentMethod,
+            "admin",
+            JSON.stringify(data.gateway_response) || "Payment successful",
+          ]
+        );
+      } else {
+        // Log the failed payment
+        await db.query(
+          `INSERT INTO payment_logs (order_id, payment_reference, status, failure_reason, processed_by, created_at)
         VALUES ($1, $2, $3, $4, $5, now())
         ON CONFLICT (payment_reference) DO NOTHING`,
-        [result.rows[0].id, reference, status, data.gateway_response, "admin"]
-      );
-    }
+          [
+            result.rows[0].id,
+            reference,
+            paymentStatus,
+            data.gateway_response || "Payment failed",
+            "admin",
+          ]
+        );
+      }
 
-    res.status(200).json({
-      success: true,
-      data: {
-        order: result.rows[0],
-        payment_status: status,
-        payment_method: paymentMethod,
-        customer_id: result.rows[0].user_id,
-        verification_type: "manual",
-        verified_by: "admin",
-        verified_at: new Date().toISOString(),
-        admin_id: req.user.id
-      },
-    });
+      res.status(200).json({
+        success: true,
+        data: {
+          order: result.rows[0],
+          payment_status: paymentStatus,
+          payment_method: paymentMethod,
+          customer_id: result.rows[0].user_id,
+          verification_type: "manual",
+          verified_by: "admin",
+          verified_at: new Date().toISOString(),
+          admin_id: req.user.id,
+        },
+      });
+    } catch (verificationError) {
+      console.error(
+        "Paystack verification error:",
+        verificationError.response?.data || verificationError.message
+      );
+
+      return res.status(500).json({
+        success: false,
+        message: "Payment verification failed",
+        error:
+          verificationError.response?.data?.message ||
+          verificationError.message,
+      });
+    }
   } catch (err) {
     console.log("Verify payment error", err);
     res.status(500).json({
