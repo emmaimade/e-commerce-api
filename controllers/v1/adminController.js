@@ -44,12 +44,19 @@ export const adminGetUser = async (req, res) => {
 // ========================================
 
 export const addProduct = async (req, res) => {
+  const client = await db.connect()
+
   try {
+    await client.query("BEGIN");
+
     const { name, description, price, inventory_qty, image_urls } = req.body;
     let images = [];
 
     if (!name || !description || !price || !inventory_qty) {
-      return res.status(400).json({ message: "All fields are required" });
+      return res.status(400).json({
+        success: false, 
+        message: "All fields are required" 
+      });
     }
 
     const priceNum = parseInt(price);
@@ -58,13 +65,19 @@ export const addProduct = async (req, res) => {
     if (isNaN(priceNum) || isNaN(inventoryNum)) {
       return res
         .status(400)
-        .json({ message: "Price and inventory must be numbers" });
+        .json({ 
+          success: false,
+          message: "Price and inventory must be numbers" 
+        });
     }
 
     if (priceNum <= 0 || inventoryNum <= 0) {
       return res
         .status(400)
-        .json({ message: "Price and inventory must be greater than 0" });
+        .json({ 
+          success: false,
+          message: "Price and inventory must be greater than 0" 
+        });
     }
 
     let uploadData = [];
@@ -114,7 +127,7 @@ export const addProduct = async (req, res) => {
     }
     console.log(typeof(images));
 
-    const newProduct = await db.query(
+    const newProduct = await client.query(
       `INSERT INTO products (name, description, price, inventory_qty, images) 
       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
       [name, description, priceNum, inventoryNum, JSON.stringify(images)]
@@ -126,6 +139,9 @@ export const addProduct = async (req, res) => {
       product.images = JSON.parse(product.images);
     }
 
+    // Commit transaction
+    await client.query("COMMIT");
+
     res.status(201).json({
       success: true,
       message: "Product added successfully",
@@ -133,6 +149,7 @@ export const addProduct = async (req, res) => {
     });
   } catch (err) {
     console.log("Error adding product", err);
+    await client.query("ROLLBACK");
     res.status(500).json({ 
         success: false,
         message: "Error adding product",
@@ -142,6 +159,7 @@ export const addProduct = async (req, res) => {
 };
 
 export const updateProduct = async (req, res) => {
+  const client = await db.connect();
   try {
     const productId = req.params.id;
     const updates = req.body;
@@ -165,8 +183,8 @@ export const updateProduct = async (req, res) => {
 
     // Filter only allowed fields
     for (const [key, value] of Object.entries(updates)) {
-      if (allowedFields.includes(key) && value !== undefined && value !== "") {
-        allowedUpdates[key] = value;
+      if (allowedFields.includes(key) && value.trim() && value !== undefined && value !== "") {
+        allowedUpdates[key] = value.trim();
       }
     }
 
@@ -187,7 +205,9 @@ export const updateProduct = async (req, res) => {
 
       // Check if currentImages is a proper array
       if (!Array.isArray(currentImages)) {
-        console.warn('Current images is not an array after parsing, resetting to empty array')
+        console.warn(
+          "Current images is not an array after parsing, resetting to empty array"
+        );
         currentImages = [];
       }
     } catch (parseErr) {
@@ -219,7 +239,7 @@ export const updateProduct = async (req, res) => {
         });
       }
     }
-    
+
     // Initialize images to upload
     // This will hold both file uploads and image URLs
     let imagesToUpload = [];
@@ -240,24 +260,30 @@ export const updateProduct = async (req, res) => {
           urls = [updates.image_urls];
         }
       } else if (Array.isArray(updates.image_urls)) {
-          urls = updates.image_urls;
+        urls = updates.image_urls;
       }
 
       // Validate URLs and Add to imageToUpdate
-      const validUrls = urls.filter(url => typeof url === "string" && url.trim() !== "");
+      const validUrls = urls.filter(
+        (url) => typeof url === "string" && url.trim() !== ""
+      );
       imagesToUpload = [...imagesToUpload, ...validUrls];
     }
 
     // Checks if price is a number
     if (allowedUpdates.price) {
       if (isNaN(allowedUpdates.price)) {
-        return res.status(400).json({ message: "Price must be a number" });
+        return res.status(400).json({
+          success: false,
+          message: "Price must be a number",
+        });
       }
       // Checks if price is greater than one
       if (allowedUpdates.price <= 0) {
-        return res
-          .status(400)
-          .json({ message: "Price must be greater than 0" });
+        return res.status(400).json({
+          success: false,
+          message: "Price must be greater than 0",
+        });
       }
     }
 
@@ -265,21 +291,28 @@ export const updateProduct = async (req, res) => {
     if (allowedUpdates.inventory_qty) {
       // check if inventory_qty is a number
       if (isNaN(allowedUpdates.inventory_qty)) {
-        return res.status(400).json({ message: "Inventory must be a number" });
+        return res.status(400).json({
+          success: false,
+          message: "Inventory must be a number",
+        });
       }
       // checks if inventory_qty is greater than one
       if (allowedUpdates.inventory_qty <= 0) {
-        return res
-          .status(400)
-          .json({ message: "Inventory must be greater than 0" });
+        return res.status(400).json({
+          success: false,
+          message: "Inventory must be greater than 0",
+        });
       }
     }
 
     // Check if there are any updates to make (including images)
-    if (Object.keys(allowedUpdates).length === 0 && imagesToUpload.length === 0) {
-      return res.status(400).json({ 
+    if (
+      Object.keys(allowedUpdates).length === 0 &&
+      imagesToUpload.length === 0
+    ) {
+      return res.status(400).json({
         success: false,
-        message: "No fields to update" 
+        message: "No fields to update",
       });
     }
 
@@ -319,7 +352,7 @@ export const updateProduct = async (req, res) => {
         });
       }
     }
-  
+
     // Database Update
     try {
       // Dynamic sql query
@@ -342,6 +375,9 @@ export const updateProduct = async (req, res) => {
         updatedProduct.images = JSON.parse(updatedProduct.images);
       }
 
+      // Commit transaction
+      await client.query("COMMIT");
+
       res.status(200).json({
         success: true,
         message: "Product updated successfully",
@@ -349,6 +385,9 @@ export const updateProduct = async (req, res) => {
       });
     } catch (dbErr) {
       console.error("Database update failed", dbErr);
+
+      // Rollback transaction
+      await client.query("ROLLBACK");
 
       // If database update fails, clean up uploaded images
       if (uploadedPublicIds.length > 0) {
@@ -370,11 +409,14 @@ export const updateProduct = async (req, res) => {
     }
   } catch (err) {
     console.log("Error updating product", err);
+    await client.query("ROLLBACK");
     res.status(500).json({
-        success: false,
-        message: "Error updating product", 
-        error: err.message 
+      success: false,
+      message: "Error updating product",
+      error: err.message,
     });
+  } finally {
+    client.release();
   }
 };
 
@@ -579,19 +621,32 @@ export const getOrdersAdmin = async (req, res) => {
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
     const offset = (page - 1) * limit;
 
+    // Search by order status
+    const { order_status } = req.query;
+
+    let whereClause = "";
+    const queryParams = [limit, offset];
+
+    if (order_status) {
+      whereClause = "WHERE o.order_status = $3";
+      queryParams.push(order_status);
+    }
+
+    // Get orders
     const ordersQuery = `
       SELECT
         o.*,
         a.line1, a.city, a.state, a.postal_code, a.country
       FROM orders o
       LEFT JOIN addresses a ON o.shipping_address_id = a.id
+      ${whereClause}
       ORDER BY o.placed_at DESC
       LIMIT $1 OFFSET $2
     `;
 
-    const orders = await db.query(ordersQuery, [limit, offset]);
+    const orders = await db.query(ordersQuery, queryParams);
 
-    // get order items for each order
+    // Get order items for each order
     for (let order of orders.rows) {
       const itemsQuery = `
         SELECT
@@ -606,11 +661,11 @@ export const getOrdersAdmin = async (req, res) => {
       order.items = items.rows;
     }
 
-    // get total number of orders
+    // Get total number of orders
     const countResult = await db.query(`SELECT COUNT(*) as total FROM orders`);
     const totalOrders = parseInt(countResult.rows[0].total);
 
-    // calculate pagination
+    // Calculate pagination
     const totalPages = Math.ceil(totalOrders / limit);
     const hasNextPage = page < totalPages;
     const hasPrevPage = page > 1;
@@ -700,7 +755,10 @@ export const getOrderAdmin = async (req, res) => {
 };
 
 export const verifyPaymentAdmin = async (req, res) => {
+  const client = db.connect();
   try {
+    await client.query("BEGIN");
+
     const { reference } = req.body;
 
     // Input validation
@@ -712,12 +770,13 @@ export const verifyPaymentAdmin = async (req, res) => {
     }
 
     // Check if order exists
-    const existingOrder = await db.query(
+    const existingOrder = await client.query(
       "SELECT * FROM orders WHERE payment_ref = $1",
       [reference]
     );
 
     if (existingOrder.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
         message: "Payment reference not found",
@@ -750,6 +809,7 @@ export const verifyPaymentAdmin = async (req, res) => {
             Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
             "Content-Type": "application/json",
           },
+          timeout: 10000, // 10 seconds timeout
         }
       );
 
@@ -759,6 +819,10 @@ export const verifyPaymentAdmin = async (req, res) => {
       );
 
       if (!verificationResponse.data.status) {
+        console.error("Paystack verification failed:", verificationResponse.data);
+
+        await client.query("ROLLBACK");
+
         return res.status(400).json({
           success: false,
           message: "Payment verification failed",
@@ -782,7 +846,7 @@ export const verifyPaymentAdmin = async (req, res) => {
       RETURNING *
     `;
 
-      const result = await db.query(updateQuery, [
+      const result = await client.query(updateQuery, [
         paymentStatus,
         paymentMethod,
         reference,
@@ -798,7 +862,7 @@ export const verifyPaymentAdmin = async (req, res) => {
         }
 
         // Log the payment transaction for audit trail
-        await db.query(
+        await client.query(
           `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now()) ON CONFLICT (payment_reference) DO NOTHING`,
           [
             result.rows[0].id,
@@ -810,9 +874,15 @@ export const verifyPaymentAdmin = async (req, res) => {
             JSON.stringify(data.gateway_response) || "Payment successful",
           ]
         );
+
+        // Update order status history
+        await client.query(
+          `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
+          [result.rows[0].id, "processing", "Payment verified, order is being processed"]
+        );
       } else {
         // Log the failed payment
-        await db.query(
+        await client.query(
           `INSERT INTO payment_logs (order_id, payment_reference, status, failure_reason, processed_by, created_at)
         VALUES ($1, $2, $3, $4, $5, now())
         ON CONFLICT (payment_reference) DO NOTHING`,
@@ -824,7 +894,15 @@ export const verifyPaymentAdmin = async (req, res) => {
             "admin",
           ]
         );
+
+        // Update order status history
+        await client.query(
+          "INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)",
+          [result.rows[0].id, "failed", "Payment verification failed"]
+        );
       }
+
+      await client.query("COMMIT");
 
       res.status(200).json({
         success: true,
@@ -845,6 +923,8 @@ export const verifyPaymentAdmin = async (req, res) => {
         verificationError.response?.data || verificationError.message
       );
 
+      await client.query("ROLLBACK");
+
       return res.status(500).json({
         success: false,
         message: "Payment verification failed",
@@ -855,10 +935,81 @@ export const verifyPaymentAdmin = async (req, res) => {
     }
   } catch (err) {
     console.log("Verify payment error", err);
+    await client.query("ROLLBACK");
     res.status(500).json({
       success: false,
       message: "Payment Verification failed",
       error: err.message,
     });
+  } finally {
+    client.release();
+  }
+};
+
+export const updateOrderStatus = async (req, res) => {
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const orderId = req.params.id;
+    const { status, notes } = req.body;
+
+    // Input validation
+    if (!status) {
+      return res.status(400).json({
+        success: false,
+        message: "Order status is required",
+      });
+    }
+
+    // Validate status
+    const validStatuses = ["pending", "processing", "shipped", "delivered", "cancelled"];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status. Valid statuses are: ${validStatuses.join(", ")}`,
+      });
+    }
+
+    const query = `
+      UPDATE orders
+      SET order_status = $1, updated_at = NOW()
+      WHERE id = $2
+      RETURNING *
+    `;
+
+    const result = await client.query(query, [status, orderId]);
+
+    if (result.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        success: true,
+        message: "Order not found"
+      });
+    }
+
+    // Update Order Status History
+    await client.query(
+      "INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)",
+      [orderId, status, notes]
+    );
+
+    await client.query("COMMIT");
+    res.status(200).json({
+      success: false,
+      message: "Order status updated successfully",
+      data: result.rows[0],
+    });
+  } catch (err) {
+    console.log("Error updating order status", err);
+    await client.query("ROLLBACK");
+    res.status(500).json({
+      success: false,
+      message: "Failed to update order status",
+      error: err.message,
+    });
+  } finally {
+    client.release();
   }
 };
