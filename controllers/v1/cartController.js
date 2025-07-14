@@ -1,7 +1,11 @@
 import db from "../../config/db.js";
 
 export const addToCart = async (req, res) => {
+  const client = await db.connect();
+
   try {
+    await client.query("BEGIN");
+
     const userId = req.user.id;
     const { productId, quantity } = req.body;
 
@@ -22,10 +26,11 @@ export const addToCart = async (req, res) => {
     }
 
     // checks if product exists
-    const product = await db.query("SELECT * from products WHERE id = $1", [
+    const product = await client.query("SELECT * from products WHERE id = $1", [
       productId,
     ]);
     if (product.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({
         success: false,
         message: "Product not found",
@@ -42,14 +47,14 @@ export const addToCart = async (req, res) => {
     }
 
     // checks if user has a cart already and if not create one
-    const cart = await db.query("SELECT id FROM carts WHERE user_id = $1", [
+    const cart = await client.query("SELECT id FROM carts WHERE user_id = $1", [
       userId,
     ]);
 
     let cartId;
 
     if (cart.rows.length === 0) {
-      const newCart = await db.query(
+      const newCart = await client.query(
         "INSERT INTO carts (user_id) VALUES ($1) RETURNING id",
         [userId]
       );
@@ -60,40 +65,46 @@ export const addToCart = async (req, res) => {
     }
 
     // checks if product already exists in cart
-    const existingItem = await db.query(
+    const existingItem = await client.query(
       "SELECT * FROM cart_items WHERE cart_id = $1 AND product_id = $2",
       [productId, cartId]
     );
 
     if (existingItem.rows.length > 0) {
-      await db.query(
+      await client.query(
         "UPDATE cart_items SET quantity = quantity + $1 WHERE id = $2",
         [quantity, existingItem.rows[0].id]
       );
     } else {
       // add product to cart_items
-      await db.query(
+      await client.query(
         "INSERT INTO cart_items (cart_id, product_id, quantity) VALUES ($1, $2, $3)",
         [cartId, productId, quantity]
       );
     }
 
     // update timestamp
-    await db.query("UPDATE carts SET updated_at = NOW() WHERE id = $1", [
+    await client.query("UPDATE carts SET updated_at = NOW() WHERE id = $1", [
       cartId,
     ]);
+
+    // commit transaction
+    await client.query("COMMIT");
 
     res.status(200).json({
       success: true,
       message: "Product added to cart successfully",
     });
   } catch (err) {
+    await client.query("ROLLBACK");
     console.log("Add to cart error:", err.message);
     res.status(500).json({
       success: false,
       message: "Server Error",
       error: err.message,
     });
+  } finally {
+    client.release();
   }
 };
 
@@ -180,7 +191,11 @@ export const getCart = async (req, res) => {
 };
 
 export const updateItemQty = async (req, res) => {
+  const client = await db.connect();
+
   try {
+    await client.query("BEGIN");
+
     const userId = req.user.id;
     const itemId = req.params.id;
     const quantity = parseInt(req.body.quantity);
@@ -202,9 +217,10 @@ export const updateItemQty = async (req, res) => {
             WHERE ci.id = $1 AND c.user_id = $2
         `;
 
-    const result = await db.query(query, [itemId, userId]);
+    const result = await client.query(query, [itemId, userId]);
 
     if (result.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({
         success: true,
         error: "Cart item not found",
@@ -228,10 +244,13 @@ export const updateItemQty = async (req, res) => {
         WHERE id = $2
         RETURNING *
     `;
-    await db.query(updateQuery, [quantity, itemId]);
+    await client.query(updateQuery, [quantity, itemId]);
 
     // calculate new item total
     const newItemTotal = quantity * parseFloat(item.price);
+
+    // commit transaction
+    await client.query("COMMIT");
 
     res.status(200).json({
       success: true,
@@ -243,12 +262,15 @@ export const updateItemQty = async (req, res) => {
       },
     });
   } catch (err) {
+    await client.query("ROLLBACK");
     console.log("Error updating item quantity", err.message);
     res.status(500).json({
       success: false,
       message: "Server Error",
       error: err.message,
     });
+  } finally {
+    client.release();
   }
 };
 

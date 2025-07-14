@@ -5,7 +5,11 @@ import { updateProductInventory } from "./paymentController.js";
 
 // create order
 export const createOrder = async (req, res) => {
+  const client = await db.connect();
+
   try {
+    await client.query("BEGIN");
+
     const userId = req.user.id;
     const { shipping_address_id } = req.body;
 
@@ -17,12 +21,13 @@ export const createOrder = async (req, res) => {
     }
 
     // Check shipping_address_id exist for user
-    const checkAddress = await db.query(
+    const checkAddress = await client.query(
       "SELECT * FROM addresses WHERE id =$1 AND user_id = $2",
       [shipping_address_id, userId]
     );
 
     if (checkAddress.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({
         success: false,
         message: "User shipping address not found",
@@ -44,9 +49,10 @@ export const createOrder = async (req, res) => {
             WHERE c.user_id = $1
         `;
 
-    const cartResult = await db.query(cartQuery, [userId]);
+    const cartResult = await client.query(cartQuery, [userId]);
 
     if (cartResult.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
         message: "Cart is empty",
@@ -59,6 +65,7 @@ export const createOrder = async (req, res) => {
     const outOfStockItems = cartResult.rows.filter(item => item.quantity > item.stock_quantity);
 
     if (outOfStockItems.length > 0) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
         message: "Some items are out of stock",
@@ -84,7 +91,7 @@ export const createOrder = async (req, res) => {
         INSERT INTO orders (user_id, total, shipping_address_id) VALUES ($1, $2, $3) RETURNING *;
     `;
 
-    const orderResult = await db.query(orderQuery, [
+    const orderResult = await client.query(orderQuery, [
       userId,
       total,
       shipping_address_id,
@@ -98,13 +105,19 @@ export const createOrder = async (req, res) => {
     `;
 
     for (const item of cartResult.rows) {
-      await db.query(orderItemsQuery, [
+      await client.query(orderItemsQuery, [
         order.id,
         item.product_id,
         item.quantity,
         item.price,
       ]);
     }
+
+    // Log order creation history
+    await client.query(
+      `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, 'pending', 'Order created')`,
+      [order.id]
+    );
 
     // Generate unique payment reference
     const paymentReference = `order-${order.id}-${Date.now()}`;
@@ -152,12 +165,14 @@ export const createOrder = async (req, res) => {
             Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
             "Content-Type": "application/json",
           },
+          timeout: 10000, // 10 seconds timeout
         }
       );
 
       console.log("Paystack initialization response:", paymentResponse.data);
 
       if (!paymentResponse.data.status) {
+        await client.query("ROLLBACK");
         return res.status(500).json({
           success: false,
           message: "Failed to initialize payment",
@@ -166,10 +181,13 @@ export const createOrder = async (req, res) => {
       }
 
       // update order with payment_reference
-      await db.query("UPDATE orders SET payment_ref = $1 WHERE id = $2", [
+      await client.query("UPDATE orders SET payment_ref = $1 WHERE id = $2", [
         paymentReference,
         order.id,
       ]);
+
+      // Commit transaction
+      await client.query("COMMIT");
 
       res.status(201).json({
         success: true,
@@ -182,11 +200,8 @@ export const createOrder = async (req, res) => {
       });
     } catch (paymentError) {
       console.error("Paystack payment initialization error:", paymentError);
-
-      // If payment initialization fails, rollback order creation
-      await db.query("DELETE FROM order_items WHERE order_id = $1", [order.id]);
-
-      await db.query("DELETE FROM orders WHERE id = $1", [order.id]);
+      // Rollback transaction on payment error
+      await client.query("ROLLBACK");
 
       return res.status(500).json({
         success: false,
@@ -196,17 +211,30 @@ export const createOrder = async (req, res) => {
     }
   } catch (err) {
     console.log("Create order error", err);
+
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackError) {
+      console.error("Rollback error:", rollbackError);
+    }
+
     res.status(500).json({
       success: false,
       message: "Failed to create order",
       error: err.message,
     });
+  } finally {
+    client.release();
   }
 };
 
 // verify payment (user)
 export const verifyPayment = async (req, res) => {
+  const client = await db.connect();
+
   try {
+    await client.query("BEGIN");
+
     const { reference } = req.params;
     const userId = req.user.id;
 
@@ -218,12 +246,13 @@ export const verifyPayment = async (req, res) => {
     }
 
     // Check if user has an order with the payment reference
-    const orderCheck = await db.query(
+    const orderCheck = await client.query(
       "SELECT * FROM orders WHERE payment_ref = $1 AND user_id = $2",
       [reference, userId]
     );
 
     if (orderCheck.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
         message: "Payment not found or access denied",
@@ -249,12 +278,14 @@ export const verifyPayment = async (req, res) => {
             Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
             "Content-Type": "application/json",
           },
+          timeout: 10000, // 10 seconds timeout
         }
       );
 
       console.log("Paystack verification response:", verificationResponse.data);
 
       if (!verificationResponse.data.status) {
+        await client.query("ROLLBACK");
         return res.status(500).json({
           success: false,
           message: "Payment verification failed",
@@ -278,21 +309,13 @@ export const verifyPayment = async (req, res) => {
       RETURNING *
     `;
 
-      const result = await db.query(updateQuery, [
+      const result = await client.query(updateQuery, [
         paymentStatus,
         paymentMethod,
         reference,
       ]);
 
       if (paymentStatus === "paid") {
-        // Delete cart items
-        await db.query(
-          `
-        DELETE FROM cart_items 
-        WHERE cart_id IN (SELECT id from carts WHERE user_id = $1)`,
-          [userId]
-        );
-
         // Update Product Inventory
         try {
           await updateProductInventory(result.rows[0].id);
@@ -301,8 +324,16 @@ export const verifyPayment = async (req, res) => {
           console.log("Inventory update failed:", inventoryError.message);
         }
 
+        // Delete cart items
+        await client.query(
+          `
+        DELETE FROM cart_items 
+        WHERE cart_id IN (SELECT id from carts WHERE user_id = $1)`,
+          [userId]
+        );
+
         // Log the payment transaction for audit trail
-        await db.query(
+        await client.query(
           `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
         ON CONFLICT (payment_reference) DO NOTHING`,
           [
@@ -315,9 +346,21 @@ export const verifyPayment = async (req, res) => {
             JSON.stringify(data.gateway_response) || "Payment successful",
           ]
         );
+
+        // Update order status history
+        await client.query(
+          `
+            INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)
+          `,
+          [
+            result.rows[0].id,
+            "processing",
+            "Payment verified and order is being processed",
+          ]
+        );
       } else {
         // Log the failed payment
-        await db.query(
+        await client.query(
           `INSERT INTO payment_logs (order_id, payment_reference, status, failure_reason, processed_by, created_at)
         VALUES ($1, $2, $3, $4, $5, now())
         ON CONFLICT (payment_reference) DO NOTHING`,
@@ -329,7 +372,16 @@ export const verifyPayment = async (req, res) => {
             "user",
           ]
         );
+
+        // Add failure entry to order history
+        await client.query(
+          `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
+          [result.rows[0].id, "failed", "Payment verification failed"]
+        );
       }
+
+      // Commit transaction
+      await client.query("COMMIT");
 
       res.status(200).json({
         success: true,
@@ -341,6 +393,7 @@ export const verifyPayment = async (req, res) => {
         },
       });
     } catch (verificationError) {
+      await client.query("ROLLBACK");
       console.error(
         "Paystack verification error:",
         verificationError.response?.data || verificationError.message
@@ -354,18 +407,24 @@ export const verifyPayment = async (req, res) => {
       });
     }
   } catch (err) {
+    await client.query("ROLLBACK");
     console.log("Verify payment error", err);
     res.status(500).json({
       success: false,
       message: "Payment Verification failed",
       error: err.message,
     });
+  } finally {
+    client.release();
   }
 };
 
 // get all user orders
 export const getOrders = async (req, res) => {
+  const client = await db.connect();
   try {
+    await client.query("BEGIN");
+
     const userId = req.user.id;
 
     const ordersQuery = `
@@ -378,7 +437,7 @@ export const getOrders = async (req, res) => {
       ORDER BY o.placed_at DESC
     `;
 
-    const orders = await db.query(ordersQuery, [userId]);
+    const orders = await client.query(ordersQuery, [userId]);
 
     if (orders.rows.length === 0) {
       return res.status(404).json({
@@ -398,9 +457,12 @@ export const getOrders = async (req, res) => {
         WHERE oi.order_id = $1
       `;
 
-      const items = await db.query(itemsQuery, [order.id]);
+      const items = await client.query(itemsQuery, [order.id]);
       order.items = items.rows;
     }
+
+    // Commit transaction
+    await client.query("COMMIT");
 
     res.status(200).json({
       success: false,
@@ -408,6 +470,7 @@ export const getOrders = async (req, res) => {
     });
   } catch (err) {
     console.log("Error getting orders", err);
+    await client.query("ROLLBACK");
     res.status(500).json({
       success: false,
       message: "Error getting orders",
@@ -475,3 +538,49 @@ export const getOrder = async (req, res) => {
     });
   }
 };
+
+// get order history
+export const getOrderHistory = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { orderId } = req.params
+
+    if (!orderId || isNaN(orderId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid order ID",
+      });
+    }
+
+    // Check if order exists for the user
+    const orderCheck = await db.query(
+      `SELECT * FROM orders WHERE id = $1 AND user_id = $2`,
+      [orderId, userId]
+    );
+
+    if (orderCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found",
+      });
+    }
+
+    // Fetch order status history
+    const orderHistoryQuery = await db.query(
+      `SELECT status, notes, created_at FROM order_status_history WHERE order_id = $1 ORDER BY created_at DESC`,
+      [orderId]
+    );
+
+    res.status(200).json({
+      success: true,
+      data: orderHistoryQuery.rows,
+    });
+  } catch (err) {
+    console.log("Error fetching order history", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch order history",
+      error: err.message,
+    });
+  }
+}
