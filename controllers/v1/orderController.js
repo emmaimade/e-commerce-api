@@ -347,6 +347,12 @@ export const verifyPayment = async (req, res) => {
           ]
         );
 
+        // Update order_status in orders
+        await db.query(
+          `UPDATE orders SET order_status = 'processing', updated_at = now() WHERE id = $1`,
+          [result.rows[0].id]
+        );
+
         // Update order status history
         await client.query(
           `
@@ -450,7 +456,7 @@ export const getOrders = async (req, res) => {
     for (let order of orders.rows) {
       const itemsQuery = `
         SELECT
-          oi.*
+          oi.*,
           p.name as product_name, p.images
         FROM order_items oi
         LEFT JOIN products p ON oi.product_id = p.id
@@ -465,7 +471,7 @@ export const getOrders = async (req, res) => {
     await client.query("COMMIT");
 
     res.status(200).json({
-      success: false,
+      success: true,
       data: orders.rows,
     });
   } catch (err) {
@@ -545,10 +551,10 @@ export const getOrderHistory = async (req, res) => {
     const userId = req.user.id;
     const { orderId } = req.params
 
-    if (!orderId || isNaN(orderId)) {
+    if (!orderId) {
       return res.status(400).json({
         success: false,
-        message: "Invalid order ID",
+        message: "Order ID is required",
       });
     }
 

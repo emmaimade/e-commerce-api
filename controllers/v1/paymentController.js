@@ -183,6 +183,12 @@ export const handleSuccessfulPayment = async (data) => {
         ]
       );
 
+      // Update order_status in orders
+      await db.query(
+        `UPDATE orders SET order_status = 'processing', updated_at = now() WHERE id = $1`,
+        [order.id]
+      );
+
       // Update order status history
       await db.query(
         `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
@@ -364,7 +370,7 @@ export const getPaymentStatus = async (req, res) => {
 
     const queryParams = [reference];
 
-    // Regular users can only see their own orders, admins can see any order
+    // Regular users can only see their own orders
     if (userRole !== "admin") {
       query += " AND o.user_id = $2";
       queryParams.push(userId);

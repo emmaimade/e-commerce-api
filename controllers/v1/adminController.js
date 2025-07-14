@@ -875,6 +875,12 @@ export const verifyPaymentAdmin = async (req, res) => {
           ]
         );
 
+        // Update order_status in orders
+        await db.query(
+          `UPDATE orders SET order_status = 'processing', updated_at = now() WHERE id = $1`,
+          [result.rows[0].id]
+        );
+
         // Update order status history
         await client.query(
           `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
@@ -997,7 +1003,7 @@ export const updateOrderStatus = async (req, res) => {
 
     await client.query("COMMIT");
     res.status(200).json({
-      success: false,
+      success: true,
       message: "Order status updated successfully",
       data: result.rows[0],
     });

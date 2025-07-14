@@ -334,7 +334,7 @@ export const resetPassword = async (req, res) => {
 
     // Update user password and clear reset token
     await db.query(
-      "UPDATE users SET password = $1, reset_password_token = NULL, reset_token_expiry = NULL WHERE id = $2",
+      "UPDATE users SET password = $1, reset_password_token = NULL, reset_token_expiry = NULL, updated_at = NOW() WHERE id = $2",
       [hashedPassword, user.rows[0].id]
     );
 
