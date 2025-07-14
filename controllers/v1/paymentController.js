@@ -145,6 +145,14 @@ export const handleSuccessfulPayment = async (data) => {
         new_status: order.status,
       });
 
+      // Update Product Inventory
+      try {
+        await updateProductInventory(order.id);
+        console.log("Inventory updated successfully");
+      } catch (inventoryError) {
+        console.log("Inventory update failed:", inventoryError.message);
+      }
+
       // Only clear cart if order was actually updated (was pending)
       // This prevents clearing cart if user already verified payment
       const cartClearResult = await db.query(
@@ -175,13 +183,11 @@ export const handleSuccessfulPayment = async (data) => {
         ]
       );
 
-      // Update Product Inventory
-      try {
-        await updateProductInventory(order.id);
-        console.log("Inventory updated successfully");
-      } catch (inventoryError) {
-        console.log("Inventory update failed:", inventoryError.message);
-      }
+      // Update order status history
+      await db.query(
+        `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
+        [order.id, "processing", "Payment verified, order is being processed"]
+      );
     } else {
       console.log("No pending order found for reference:", reference);
       console.log("This might mean payment was already verified by user");
@@ -228,6 +234,12 @@ export const handleFailedPayment = async (data) => {
         ON CONFLICT (payment_reference) DO NOTHING`,
         [order.id, reference, "failed", gateway_response, "webhook"]
       );
+
+      // Update order status history
+      await db.query(
+        `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
+        [order.id, "failed", `Payment verification failed`]
+      );
     } else {
       console.log(
         "No pending order found for failed payment reference:",
@@ -244,7 +256,11 @@ export const handleFailedPayment = async (data) => {
 
 // Update product inventory
 export const updateProductInventory = async (orderId) => {
+  const client = await db.connect();
+
   try {
+    await client.query("BEGIN");
+
     console.log(`Updating inventory for ORDER ID: ${orderId}`);
 
     // Get order items
@@ -259,7 +275,7 @@ export const updateProductInventory = async (orderId) => {
             WHERE oi.order_id = $1
         `;
 
-    const orderItemsResult = await db.query(orderItemsQuery, [orderId]);
+    const orderItemsResult = await client.query(orderItemsQuery, [orderId]);
 
     if (orderItemsResult.rows.length === 0) {
       console.log(`No order items found for ORDER ID: ${orderId}`);
@@ -271,7 +287,7 @@ export const updateProductInventory = async (orderId) => {
         item;
       const newStockQuantity = Math.max(0, current_stock - ordered_quantity);
 
-      await db.query(
+      await client.query(
         `UPDATE products
         SET inventory_qty = $1, updated_at = now()
         WHERE id = $2`,
@@ -284,21 +300,25 @@ export const updateProductInventory = async (orderId) => {
 
       // Update product status if it goes out of stock
       if (newStockQuantity === 0) {
-        await db.query(
+        await client.query(
           `UPDATE products SET status = 'out_of_stock' WHERE id = $1`,
           [product_id]
         );
         console.log(`Product ${product_name} is now out of stock`);
       }
     }
+    await client.query("COMMIT");
 
     console.log(`Updated inventory successfully for order ${orderId}`);
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error("Error updating product inventory:", {
       error: err.message,
       stack: err.stack,
       orderId: orderId,
     });
+  } finally {
+    client.release();
   }
 };
 

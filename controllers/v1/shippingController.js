@@ -199,8 +199,8 @@ export const updateShippingAddress = async (req, res) => {
 
     // Filter only allowed fields
     for (const [key, value] of Object.entries(updates)) {
-      if (allowedFields.includes(key) && value !== undefined && value !== "") {
-        allowedUpdates[key] = value;
+      if (allowedFields.includes(key) && value.trim()&& value !== undefined && value !== "") {
+        allowedUpdates[key] = value.trim();
       }
     }
 
