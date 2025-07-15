@@ -621,48 +621,56 @@ export const getOrdersAdmin = async (req, res) => {
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
     const offset = (page - 1) * limit;
 
-    // Search by order status
-    const { order_status } = req.query;
+    // Search by order status and payment status
+    const { order_status, payment_status } = req.query;
 
     let whereClause = "";
-    const queryParams = [limit, offset];
+    const queryParams = [];
+    let paramIndex = 1;
 
+    // Handle order status filtering
     if (order_status) {
-      whereClause = "WHERE o.order_status = $3";
+      whereClause += whereClause ? " AND" : " WHERE";
+      whereClause += ` o.order_status = $${paramIndex}`;
       queryParams.push(order_status);
+      paramIndex++;
     }
+
+    // Handle payment status filtering
+    if (payment_status) {
+      whereClause += whereClause ? " AND" : " WHERE";
+      whereClause += ` o.status = $${paramIndex}`;
+      queryParams.push(payment_status);
+      paramIndex++;
+    }
+
+    // Add limit and offset
+    queryParams.push(limit, offset);
 
     // Get orders
     const ordersQuery = `
       SELECT
         o.*,
-        a.line1, a.city, a.state, a.postal_code, a.country
+        u.name as customer_name, u.email as customer_email,
+        a.phone, a.line1, a.city, a.postal_code, a.country,
+        COUNT(oi.id) as item_count,
+        SUM(oi.quantity * oi.price) as total
       FROM orders o
+      LEFT JOIN users u ON o.user_id = u.id
       LEFT JOIN addresses a ON o.shipping_address_id = a.id
+      LEFT JOIN order_items oi ON o.id = oi.order_id
       ${whereClause}
+      GROUP BY u.name, u.email, o.id, a.phone, a.line1, a.city, a.postal_code, a.country
       ORDER BY o.placed_at DESC
-      LIMIT $1 OFFSET $2
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
 
     const orders = await db.query(ordersQuery, queryParams);
 
-    // Get order items for each order
-    for (let order of orders.rows) {
-      const itemsQuery = `
-        SELECT
-          oi.*,
-          p.name as product_name, p.images
-        FROM order_items oi
-        LEFT JOIN products p ON oi.product_id = p.id
-        WHERE oi.order_id = $1
-      `;
-
-      const items = await db.query(itemsQuery, [order.id]);
-      order.items = items.rows;
-    }
-
     // Get total number of orders
-    const countResult = await db.query(`SELECT COUNT(*) as total FROM orders`);
+    const countQuery = `SELECT COUNT(*) as total FROM orders o ${whereClause}`;
+    const countParams = queryParams.slice(0, -2);
+    const countResult = await db.query(countQuery, countParams);
     const totalOrders = parseInt(countResult.rows[0].total);
 
     // Calculate pagination
@@ -673,7 +681,7 @@ export const getOrdersAdmin = async (req, res) => {
     res.status(200).json({
       success: true,
       data: {
-        orders: orders.rows
+        orders: orders.rows.length > 0 ? orders.rows : "No orders found",
       },
       pagination: {
         current_page: page,
@@ -710,8 +718,10 @@ export const getOrderAdmin = async (req, res) => {
     const orderQuery = `
       SELECT
         o.*,
-        a.line1, a.city, a.state, a.postal_code, a.country
+        u.name as customer_name, u.email as customer_email,
+        a.phone, a.line1, a.city, a.postal_code, a.country
       FROM orders o
+      LEFT JOIN users u ON o.user_id = u.id
       LEFT JOIN addresses a ON o.shipping_address_id = a.id
       WHERE o.id = $1
     `;
