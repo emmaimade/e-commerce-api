@@ -7,6 +7,7 @@ import {
   getOrdersAdmin,
   verifyPaymentAdmin,
   updateOrderStatus,
+  getPaymentStatusAdmin,
   addProduct,
   updateProduct,
   deleteProductImage,
@@ -36,5 +37,8 @@ router.get("/orders/", adminAuth, getOrdersAdmin);
 router.get("/orders/:id", adminAuth, getOrderAdmin);
 router.post("/orders/payment/verify/", adminAuth, verifyPaymentAdmin);
 router.put("/orders/:id/status", adminAuth, updateOrderStatus);
+
+// PAYMENTS
+router.get("/payments/status/:reference", adminAuth, getPaymentStatusAdmin);
 
 export default router;

@@ -1029,3 +1029,90 @@ export const updateOrderStatus = async (req, res) => {
     client.release();
   }
 };
+
+// ========================================
+// PAYMENT CONTROLLER
+// ========================================
+
+export const getPaymentStatusAdmin = async (req, res) => {
+  try {
+    const { reference } = req.params;
+
+    // Input validation
+    if (!reference) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment reference is required",
+      });
+    }
+
+    const query = `
+      SELECT
+          o.id, 
+          o.status as payment_status, 
+          o.payment_method, 
+          o.payment_ref as payment_reference, 
+          o.order_status, 
+          o.total as total_amount, 
+          o.placed_at, 
+          o.user_id,
+          u.name as customer_name, 
+          u.email as customer_email,
+          COUNT(oi.id) as item_count
+      FROM orders o
+      LEFT JOIN users u ON o.user_id = u.id
+      LEFT JOIN order_items oi ON o.id = oi.order_id
+      WHERE o.payment_ref =$1
+      GROUP BY o.id, u.name, u.email
+    `;
+
+    const result = await db.query(query, [reference]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Payment reference not found",
+      });
+    }
+
+    const orderData = result.rows[0];
+
+    // Get payment logs for this reference
+    const logsQuery = `
+      SELECT
+          status,
+          processed_by,
+          created_at,
+          failure_reason,
+          gateway_response
+      FROM payment_logs
+      WHERE payment_reference = $1
+      ORDER BY created_at DESC
+      LIMIT 10
+    `;
+
+    const logsResult = await db.query(logsQuery, [reference]);
+
+    // No cache for admin queries
+    res.set("Cache-Control", "no-cache");
+
+    res.status(200).json({
+      success: true,
+      data: {
+        ...orderData,
+        payment_logs: logsResult.rows,
+        last_updated: new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    console.error("Error getting payment status (admin):", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to get payment status",
+      error:
+        process.env.NODE_ENV === "development"
+          ? err.message
+          : "Internal server error",
+    });
+  }
+};
