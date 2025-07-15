@@ -332,8 +332,7 @@ export const updateProductInventory = async (orderId) => {
 export const getPaymentStatus = async (req, res) => {
   try {
     const { reference } = req.params;
-    const userId = req.user?.id;
-    const userRole = req.user?.role;
+    const userId = req.user.id;
 
     // Input validation
     if (!reference) {
@@ -351,39 +350,28 @@ export const getPaymentStatus = async (req, res) => {
         });
     }
 
-    let query = `
-            SELECT
-                o.id,
-                o.status,
-                o.payment_method,
-                o.total,
-                o.placed_at,
-                o.updated_at,
-                o.payment_ref,
-                u.email as customer_email,
-                COUNT (oi.id) as item_count
-            FROM orders o
-            LEFT JOIN users u ON o.user_id = u.id
-            LEFT JOIN order_items oi ON o.id = oi.order_id
-            WHERE o.payment_ref =$1
-        `;
+    const query = `
+      SELECT
+          o.id,
+          o.status as payment_status,
+          o.payment_method,
+          o.total as total_amount,
+          o.order_status,
+          o.placed_at,
+          o.payment_ref as payment_reference,
+          COUNT(oi.id) as item_count
+      FROM orders o
+      LEFT JOIN order_items oi ON o.id = oi.order_id
+      WHERE o.payment_ref = $1 AND o.user_id = $2
+      GROUP BY o.id
+    `;
 
-    const queryParams = [reference];
-
-    // Regular users can only see their own orders
-    if (userRole !== "admin") {
-      query += " AND o.user_id = $2";
-      queryParams.push(userId);
-    }
-
-    query += " GROUP BY o.id, u.email ORDER BY o.placed_at DESC";
-
-    const result = await db.query(query, queryParams);
+    const result = await db.query(query, [reference, userId]);
 
     if (result.rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: "Payment reference not found or access denied",
+        message: "Payment not found",
       });
     }
 
@@ -391,37 +379,21 @@ export const getPaymentStatus = async (req, res) => {
 
     // Get payment logs for this reference
     const logsQuery = `
-            SELECT
-                status,
-                processed_by,
-                created_at,
-                failure_reason,
-                gateway_response
-            FROM payment_logs
-            WHERE payment_reference = $1
-            ORDER BY created_at DESC
-            LIMIT 10
-        `;
+      SELECT
+          status,
+          created_at,
+          gateway_response
+      FROM payment_logs
+      WHERE payment_reference = $1
+      ORDER BY created_at DESC
+      LIMIT 5
+    `;
 
     const logsResult = await db.query(logsQuery, [reference]);
 
-    // Get order items details
-    const itemsQuery = `
-      SELECT
-        oi.quantity,
-        oi.price,
-        p.name as product_name,
-        p.id as product_id
-      FROM order_items oi
-      JOIN products p ON oi.product_id = p.id
-      WHERE oi.order_id = $1
-    `;
-
-    const itemsResult = await db.query(itemsQuery, [orderData.id]);
-
     // Set cache control headers
     if (orderData.status === "paid") {
-      res.set("Cache-Control", "public, max-age=86400"); // 24 hours
+      res.set("Cache-Control", "public, max-age=3600"); // 1 hour
     } else {
       res.set("Cache-Control", "no-cache"); // Pending orders should not be cached
     }
@@ -430,7 +402,6 @@ export const getPaymentStatus = async (req, res) => {
       success: true,
       data: {
         ...orderData,
-        items: itemsResult.rows,
         payment_logs: logsResult.rows,
         last_updated: new Date().toISOString()
       },
@@ -439,11 +410,7 @@ export const getPaymentStatus = async (req, res) => {
     console.error("Error getting payment status:", err);
     res.status(500).json({
       success: false,
-      message: "Failed to get payment status",
-      error:
-        process.env.NODE_ENV === "development"
-          ? err.message
-          : "Internal server error",
+      message: "Failed to get payment status"
     });
   }
 };
