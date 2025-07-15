@@ -436,10 +436,14 @@ export const getOrders = async (req, res) => {
     const ordersQuery = `
       SELECT
         o.*,
-        a.line1, a.city, a.state, a.postal_code, a.country
+        a.phone, a.line1, a.city, a.postal_code, a.country,
+        COUNT (oi.id) as item_count,
+        SUM (oi.quantity * oi.price) as total
       FROM orders o
+      LEFT JOIN order_items oi ON o.id = oi.order_id
       LEFT JOIN addresses a ON o.shipping_address_id = a.id
       WHERE o.user_id = $1
+      GROUP BY o.id, a.phone, a.line1, a.city, a.postal_code, a.country
       ORDER BY o.placed_at DESC
     `;
 
@@ -450,21 +454,6 @@ export const getOrders = async (req, res) => {
         success: false,
         message: "No orders found",
       });
-    }
-
-    // get order items for each order
-    for (let order of orders.rows) {
-      const itemsQuery = `
-        SELECT
-          oi.*,
-          p.name as product_name, p.images
-        FROM order_items oi
-        LEFT JOIN products p ON oi.product_id = p.id
-        WHERE oi.order_id = $1
-      `;
-
-      const items = await client.query(itemsQuery, [order.id]);
-      order.items = items.rows;
     }
 
     // Commit transaction
@@ -501,7 +490,7 @@ export const getOrder = async (req, res) => {
     const orderQuery = `
       SELECT
         o.*,
-        a.line1, a.city, a.state, a.postal_code, a.country
+        a.phone,a.line1, a.city, a.postal_code, a.country
       FROM orders o
       LEFT JOIN addresses a ON o.shipping_address_id = a.id
       WHERE o.id = $1 AND o.user_id = $2
@@ -521,7 +510,7 @@ export const getOrder = async (req, res) => {
     // get order items
     const itemsQuery = `
       SELECT
-        oi.*
+        oi.*,
         p.name as product_name, p.images
       FROM order_items oi
       LEFT JOIN products p ON oi.product_id = p.id
