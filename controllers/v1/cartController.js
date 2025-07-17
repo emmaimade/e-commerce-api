@@ -337,3 +337,58 @@ export const deleteItem = async (req, res) => {
     });
   }
 };
+
+export const clearCart = async (req, res) => {
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const userId = req.user.id;
+
+    // Clear cart
+    const deleteResult = await client.query(
+      "DELETE FROM cart_items WHERE cart_id IN (SELECT id FROM carts WHERE user_id = $1)",
+      [userId]
+    );
+
+    const deletedCount = deleteResult.rowCount;
+    const item = deletedCount === 1 ? "item" : "items";
+
+    if (deletedCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        success: false,
+        message: "Cart is already empty",
+      });
+    }
+
+    // Update cart timestamp
+    await client.query(
+      "UPDATE carts SET updated_at = NOW() WHERE user_id = $1",
+      [userId]
+    );
+
+    // Commit transaction
+    await client.query("COMMIT");
+
+    res.status(200).json({
+      success: true,
+      message: `Cleared ${deletedCount} ${item} from cart`,
+      data: {
+        deleted_count: deletedCount,
+        cleared_at: new Date().toISOString(),
+      }
+    })
+  } catch (err) {
+    console.error("Error clearing cart: ", err);
+    await client.query("ROLLBACK");
+    res.status(500).json({
+      success: false,
+      message: "Failed to clear cart",
+      error: err.message,
+    });
+  } finally {
+    client.release();
+  }
+}
