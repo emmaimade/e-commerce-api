@@ -2,6 +2,7 @@ import express from 'express';
 import bodyParser from 'body-parser';
 
 import db from './config/db.js';
+import authRoutes from './routes/v1/authRoutes.js';
 import userRoutes from './routes/v1/userRoutes.js';
 import productRoutes from './routes/v1/productRoutes.js';
 import cartRoutes from './routes/v1/cartRoutes.js';
@@ -33,6 +34,7 @@ app.get('/health', (req, res) => {
     });
 })
 
+app.use('/v1/auth', authRoutes);   // auth
 app.use('/v1/user', userRoutes); // users
 app.use('/v1/product', productRoutes); // products
 app.use('/v1/cart', cartRoutes); // carts
