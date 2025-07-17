@@ -67,7 +67,7 @@ export const addToCart = async (req, res) => {
     // checks if product already exists in cart
     const existingItem = await client.query(
       "SELECT * FROM cart_items WHERE cart_id = $1 AND product_id = $2",
-      [productId, cartId]
+      [cartId, productId]
     );
 
     if (existingItem.rows.length > 0) {
