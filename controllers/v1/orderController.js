@@ -2,6 +2,7 @@ import axios from "axios";
 
 import db from "../../config/db.js";
 import { updateProductInventory } from "./paymentController.js";
+import createTransporter from "../../utils/email.js";
 
 // create order
 export const createOrder = async (req, res) => {
@@ -188,6 +189,64 @@ export const createOrder = async (req, res) => {
 
       // Commit transaction
       await client.query("COMMIT");
+
+      // Add this after committing the transaction in createOrder
+      const transporter = createTransporter();
+
+      const mailOptions = {
+        from: `E-commerce API <${process.env.EMAIL_USER}>`,
+        to: req.user.email,
+        subject: "Order Confirmation - Your Order Has Been Placed",
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2>Order Confirmation</h2>
+            <p>Hi ${req.user.name},</p>
+            <p>Thank you for your order! We've received your order and will process it once payment is confirmed.</p>
+        
+            <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
+              <h3>Order Details</h3>
+              <p><strong>Order ID:</strong> ${order.id}</p>
+              <p><strong>Total:</strong> ₦${(total / 100).toLocaleString()}</p>
+              <p><strong>Status:</strong> Pending Payment</p>
+            </div>
+            
+            <h3>Items Ordered:</h3>
+            <ul>
+              ${cartResult.rows.map(item => `
+                <li>${item.name} - Qty: ${item.quantity} - ₦${(item.price / 100).toLocaleString()}</li>
+              `).join('')}
+            </ul>
+      
+            <!-- Payment Link Section -->
+            <div style="background-color: #e8f4f8; padding: 20px; border-radius: 5px; margin: 20px 0; text-align: center;">
+              <h3 style="color: #2c5aa0;">Complete Your Payment</h3>
+              <p>Click the button below to complete your payment securely:</p>
+              <a href="${paymentResponse.data.data.authorization_url}" 
+                style="display: inline-block; background-color: #007bff; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; font-weight: bold; margin: 10px 0;">
+                Pay Now - ₦${(total / 100).toLocaleString()}
+              </a>
+              <p style="font-size: 12px; color: #666;">
+                This link will expire in 24 hours for security reasons.
+              </p>
+            </div>
+      
+            <p><strong>Important:</strong> Your order will be processed once payment is confirmed. You'll receive another email with payment confirmation.</p>
+      
+            <p>If you have any questions, please contact our support team with your Order ID: ${order.id}</p>
+            
+            <p>Thank you for shopping with us!</p>
+            <p>Best regards,<br>The E-commerce API Team</p>
+          </div>
+        `,
+      };
+
+      try {
+        await transporter.sendMail(mailOptions);
+        console.log("Order confirmation email sent");
+      } catch (emailError) {
+        console.log("Order confirmation email failed:", emailError.message);
+        // Don't fail the order creation due to email issues
+      }
 
       res.status(201).json({
         success: true,
@@ -577,5 +636,188 @@ export const getOrderHistory = async (req, res) => {
       message: "Failed to fetch order history",
       error: err.message,
     });
+  }
+}
+
+export const cancelOrder = async (req, res) => {
+  const client = await db.connect()
+  try {
+    await client.query("BEGIN");
+
+    const { orderId } = req.params;
+    const userId = req.user.id;
+
+    // Check if order belongs to user
+    const orderQuery = await client.query(
+      `SELECT 
+        o.*, u.email, u.name
+      FROM orders o
+      LEFT JOIN users u ON o.user_id = u.id
+      WHERE o.id = $1 AND o.user_id = $2
+      `, [orderId, userId]
+    );
+
+    if (orderQuery.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        success: false,
+        message: "Order not found or access denied",
+      });
+    }
+
+    const order = orderQuery.rows[0];
+
+    // Check if order can be cancelled
+    if (!['pending', 'processing'].includes(order.order_status)) {
+      return res.status(400).json({
+        success: false,
+        message: "Order cannot be cancelled. It is already shipped, delivered or cancelled."
+      });
+    }
+
+    let refundProcessed = false;
+    let refundError = null;
+
+    // Handle refund if payment was made
+    if (order.status === 'paid' && order.payment_ref) {
+      try {
+        const response = await axios.post('https://api.paystack.co/refund', 
+          {
+            transaction: order.payment_ref,
+            amount: order.total * 100 // Convert to kobo
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+              'Content-Type': 'application/json'
+            },
+            timeout: 30000 // 30 seconds timeout
+          }
+        );
+
+        if (response.data.status && response.data.data.status === "pending") {
+          refundProcessed = true;
+          console.log("Refund initiated:", response.data.data);
+        } else {
+          console.log("Refund failed:", response.data);
+          refundError = response.data;
+        }
+      } catch (paystackError) {
+        console.log("Error processing refund", paystackError);
+        return res.status(500).json({
+          success: false,
+          message: "Failed to process refund",
+          error: paystackError.message
+        });
+      }
+    }
+
+    // Update order status to cancelled
+    await client.query(
+      `UPDATE orders SET order_status = $1, updated_at = NOW() WHERE id = $2`, 
+      ['cancelled', orderId]
+    );
+
+    // Log status change in order_status_history
+    await client.query(
+      `INSERT INTO order_status_history (order_id, status, notes, created_at) VALUES ($1, $2, $3, NOW())`, 
+      [orderId, 'cancelled', `Order cancelled by user`]
+    );
+
+    // Restore product stock
+    const itemsQuery = await client.query(
+      `SELECT product_id, quantity FROM order_items WHERE order_id = $1`, 
+      [orderId]
+    );
+
+    for (const item of itemsQuery.rows) {
+      const productExists = await client.query('SELECT id FROM products WHERE id = $1', [item.product_id]);
+
+      if (productExists.rows.length > 0) {
+        await client.query(
+          `UPDATE products SET inventory_qty = inventory_qty + $1 WHERE id=$2`,
+          [item.quantity, item.product_id]
+        );
+      }
+    }
+
+    // Commit transaction
+    await client.query("COMMIT");
+
+    // Create transporter
+    const transporter = createTransporter();
+
+    // Email notification
+    let refundMessage = "";
+    if (refundProcessed) {
+      refundMessage = "<p>A refund has been initiated and will be processed within 5-7 working days</p>";
+    } else if (refundError) {
+      refundMessage = `
+          <p>We encountered a technical issue while processing your refund automatically. Don't worry - your refund is guaranteed!</p>
+          <p><strong>Next steps:</strong></p>
+          <ul>
+            <li>Our support team has been notified and will process your refund manually</li>
+            <li>You'll receive your refund within 2-3 business days</li>
+            <li>If you don't see the refund by then, please contact us with your order ID</li>
+          </ul>
+          <p>We apologize for any inconvenience this may cause.</p>
+        `;
+    } else {
+      refundMessage = "<p>Since no payment was made for this order, no refund is required.</p>";
+    }
+
+    const mailOptions = {
+      from: `E-Commerce API <${process.env.EMAIL_USER}>`,
+      to: order.email,
+      subject: "Order Cancellation Notification",
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2>Order Cancellation Notification</h2>
+          <p>Dear ${order.name},</p>
+          <p>Your order (ID: ${orderId}) has been successfully cancelled. Please find the details below:</p>
+          <p><strong>Order ID:</strong> ${order.id}</p>
+          <p><strong>Order Total:</strong> NGN ${(order.total / 100).toFixed(2)}</p> 
+          <p><strong>Cancellation Date:</strong> ${new Date().toLocaleDateString()}</p>     
+          ${refundMessage}
+          <p>Thank you for shopping with us</p><br>
+          <p>Best regards</p>
+          <p>The E-Commerce API Team</p>
+        </div>
+      `
+    };
+
+    // Send email
+    try {
+      await transporter.sendMail(mailOptions);
+    } catch (emailErr) {
+      console.log("Email sending failed:", emailErr);
+    }
+    
+
+    // Fetch updated order
+    const updatedOrderQuery = await client.query(
+      'SELECT * FROM orders WHERE id = $1',
+      [orderId]
+    );
+
+    const updatedOrder = updatedOrderQuery.rows[0];
+
+    res.status(200).json({
+      success: true,
+      message: "Order cancelled successfully",
+      order: updatedOrder
+    })
+  } catch (err) {
+    console.error("Error Cancelling Order", err);
+    
+    await client.query("ROLLBACK");
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to cancel order",
+      error: err.message
+    })
+  } finally {
+    client.release()
   }
 }

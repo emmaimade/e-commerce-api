@@ -5,6 +5,7 @@ import {
   getOrders,
   getOrder,
   getOrderHistory,
+  cancelOrder
 } from "../../controllers/v1/orderController.js";
 import { auth } from "../../middleware/auth.js";
 
@@ -15,5 +16,6 @@ router.get("/payment/verify/:reference", auth, verifyPayment);
 router.get("/", auth, getOrders);
 router.get("/:id", auth, getOrder);
 router.get("/:orderId/history", auth, getOrderHistory);
+router.delete("/:id", auth, cancelOrder);
 
 export default router;
