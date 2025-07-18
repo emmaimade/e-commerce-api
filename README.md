@@ -171,7 +171,7 @@ Once the server is running, you can access the Swagger documentation at:
 | POST | `/api/v1/order` | Create new order |
 | POST | `/api/v1/admin/orders/payment/verify` | Verify Payment (Admin) |
 | PUT | `/api/v1/admin/orders/:id/status` | Update order status (Admin) |
-<!--| DELETE | `/api/v1/order/:id` | Cancel order |-->
+| DELETE | `/api/v1/order/:id` | Cancel order |
 
 ### Payment Endpoints
 
