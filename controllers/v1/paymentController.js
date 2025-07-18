@@ -1,5 +1,6 @@
-import db from "../../config/db.js";
 import crypto from "crypto";
+import db from "../../config/db.js";
+import createTransporter from "../../utils/email.js";
 
 // Webhook handler
 export const handleWebhook = async (req, res) => {
@@ -84,6 +85,21 @@ export const handleWebhook = async (req, res) => {
           await handleFailedPayment(data);
           console.log("❌ Successfully processed charge.failed");
           break;
+        
+        case "refund.processed":
+          await handleSuccessfulRefund(data);
+          console.log("✅ Successfully processed refund.processed");
+          break;
+        
+        case "refund.failed":
+          await handleFailedRefund(data);
+          console.log("❌ Successfully processed refund.failed");
+          break;
+
+        case "refund.pending":
+          await handlePendingRefund(data);
+          console.log("✅ Successfully processed refund.pending");
+          break;
 
         default:
           console.log(`Unhandled webhook event: ${event}`);
@@ -103,15 +119,16 @@ export const handleWebhook = async (req, res) => {
       });
     }
   } catch (err) {
-    res.status(500).json({
+    console.error("❌ Error processing webhook:", err);
+    return res.status(500).json({
       success: false,
-      message: "Internal server error",
+      message: "Webhook processing failed",
     });
   }
 };
 
 // Successful payment handler
-export const handleSuccessfulPayment = async (data) => {
+const handleSuccessfulPayment = async (data) => {
   try {
     const { reference, channel, amount, customer } = data;
 
@@ -122,12 +139,24 @@ export const handleSuccessfulPayment = async (data) => {
       customer_email: customer?.email,
     });
 
+    // Check if payment exist
+    const existingPayment = await db.query(
+      "SELECT id FROM payments_logs WHERE payment_reference = $1",
+      [reference]
+    );
+
+    if (existingPayment.rows.length > 0) {
+      console.log("Payment already processed");
+      return;
+    }
+
     // Update order status only if it's still pending
     const updateQuery = `
             UPDATE orders
             SET
                 status = 'paid',
                 payment_method = $1,
+                order_status = 'processing',
                 updated_at = now()
             WHERE payment_ref = $2 AND status = 'pending'
             RETURNING *
@@ -183,17 +212,47 @@ export const handleSuccessfulPayment = async (data) => {
         ]
       );
 
-      // Update order_status in orders
-      await db.query(
-        `UPDATE orders SET order_status = 'processing', updated_at = now() WHERE id = $1`,
-        [order.id]
-      );
-
       // Update order status history
       await db.query(
         `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
         [order.id, "processing", "Payment verified, order is being processed"]
       );
+
+      // Create transporter
+      const transporter = createTransporter();
+
+      // Email options
+      const mailOptions = {
+        from: `E-commerce API <${process.env.EMAIL_USER}>`,
+        to: customer.email,
+        subject: "Payment Confirmation",
+        html: `
+         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h1>Payment Confirmation</h1>
+            <p>Hi ${customer.name},</p>
+            <p>Your payment for order ${order.id} has been confirmed. Your order is being processed.</p>
+            <p>Order details:</p>
+            <ul>
+                <li>Order ID: ${order.id}</li>
+                <li>Order Status: ${order.order_status}</li>
+                <li>Payment Reference: ${order.payment_ref}</li>
+                <li>Payment Method: ${order.payment_method}</li>
+            </ul>
+            <p>Thanks for shopping with us!</p>
+            <br>
+            <p>Best regards,</p>
+            <p>The E-commerce API Team</p>
+          </div>
+        `,
+      };
+
+      // Send email
+      try {
+        await transporter.sendMail(mailOptions);
+        console.log("Email sent successfully");
+      } catch (emailError) {
+        console.log("Email sending failed:", emailError.message);
+      }
     } else {
       console.log("No pending order found for reference:", reference);
       console.log("This might mean payment was already verified by user");
@@ -207,7 +266,7 @@ export const handleSuccessfulPayment = async (data) => {
 };
 
 // Failed payment handler
-export const handleFailedPayment = async (data) => {
+const handleFailedPayment = async (data) => {
   try {
     const { reference, gateway_response, customer } = data;
 
@@ -259,6 +318,190 @@ export const handleFailedPayment = async (data) => {
     });
   }
 };
+
+// Handle successful refund
+const handleSuccessfulRefund = async (data) => {
+  try {
+    const { reference, amount, customer, refund } = data;
+
+    console.log("Processing successful refund:", {
+      reference,
+      amount: amount / 100, // Convert from kobo to naira
+      customer_email: customer?.email,
+      refund_reference: refund?.reference,
+    });
+
+    // Update order status to cancelled only if it's still pending
+    const updateQuery = `
+      UPDATE orders
+      SET
+          status = 'refunded',
+          updated_at = now()
+      WHERE payment_ref = $1 AND status = 'paid'
+      RETURNING *
+    `;
+
+    const result = await db.query(updateQuery, [reference]);
+
+    if (result.rows.length > 0) {
+      const order = result.rows[0];
+
+      console.log(`Order refund processed:`, {
+        order_id: order.id,
+        user_id: order.user_id,
+        previous_status: "pending",
+        new_status: "refunded",
+      });
+
+      // Log the refund for audit trail
+      await db.query(
+        `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
+        [
+          order.id,
+          reference,
+          "refunded",
+          amount / 100,
+          order.payment_method,
+          "webhook",
+          JSON.stringify(refund?.gateway_response) || "Refund processed",
+        ]
+      );
+
+      // Update order status history
+      await db.query(
+        `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
+        [
+          order.id,
+          "refunded",
+          `Payment was refunded to ${customer.email} with reference ${refund.reference}`,
+        ]
+      );
+
+      // Create transporter
+      const transporter = createTransporter();
+      
+      // Send refund email
+      const mailOptions = {
+        from: `E-commerce API <${process.env.EMAIL_USER}>`,
+        to: customer.email,
+        subject: "Refund Notification",
+        html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h1>Refund Notification</h1>
+          <p>Hi ${customer.name},</p>
+          <p>Your refund for order (ID: ${order.id}) has been successfully processed.</p>
+          <p><strong>Payment Reference</strong>: ${order.payment_ref}</p>
+          <p><strong>Refund Reference</strong>: ${refund?.reference}</p>
+          <p><strong>Refund Amount</strong>: NGN ${(amount / 100).toFixed(2)}</p>
+          <p>The refund will reflect in your account within 3-5 business days depending on your bank.</p>
+          <p>If you have any questions or concerns, please contract our support team.</p>
+          <p>Thank you for shopping with us!</p>
+          <br>
+          <p>Best regards,</p>
+          <p>The E-commerce API Team</p>
+        </div>
+        `,
+      };
+
+      try {
+        await transporter.sendMail(mailOptions);
+        console.log("Refund email sent successfully");
+      } catch (emailErr) {
+        console.error("Error sending refund email:", emailErr);
+      }
+    } else {
+      console.log(
+        "No pending order found for refund reference:",
+        reference
+      );
+      console.log("This might mean the order was already refunded or not in a refundable state");
+    }
+  } catch (err) {
+    console.error("Error processing successful refund:", {
+      error: err.message,
+      stack: err.stack,
+    })
+  }
+}
+
+// Handle failed refund
+const handleFailedRefund = async (data) => {
+  try {
+    const { reference, customer } = data;
+
+    console.log("Processing failed refund:", {
+      reference,
+      customer_email: customer?.email,
+    });
+
+    const orderResult = await db.query(
+      "SELECT * FROM orders WHERE payment_ref = $1",
+      [reference]
+    );
+
+    if (orderResult.rows.length > 0) {
+      const order = orderResult.rows[0];
+
+      // Log the refund for audit trail
+      await db.query(
+        `INSERT INTO payment_logs (order_id, payment_reference, status, failure_reason, processed_by, created_at)
+        VALUES ($1, $2, $3, $4, $5, now())`,
+        [order.id, reference, "refund_failed", "Refund processing failed", "webhook"]
+      );
+
+      // Update order status history
+      await db.query(
+        `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
+        [order.id, "refund_failed", "Refund processing failed"]
+      );
+    }
+  } catch (err) {
+    console.error("Error processing failed refund:", {
+      error: err.message,
+      stack: err.stack,
+    })
+  }
+}
+
+// Handle pending refund
+const handlePendingRefund = async (data) => {
+  try {
+    const { reference, customer } = data;
+
+    console.log("Processing pending refund:", {
+      reference,
+      customer_email: customer?.email,
+    });
+
+    const orderResult = await db.query(
+      "SELECT * FROM orders WHERE payment_ref = $1",
+      [reference]
+    );
+
+    if (orderResult.rows.length > 0) {
+      const order = orderResult.rows[0];
+
+      // Log refund for audit trail
+      await db.query(
+        `INSERT INTO payment_logs (order_id, payment_reference, status, processed_by, created_at)
+        VALUES ($1, $2, $3, $4, now())`,
+        [order.id, reference, "refund_pending", "webhook"]
+      );
+
+      // Update order status history
+      await db.query(
+        `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
+        [order.id, "refund_pending", "Refund is pending"]
+      );
+    }
+  } catch (err) {
+    console.error("Error processing pending refund:", {
+      error: err.message,
+      stack: err.stack,
+    })
+  }
+}
 
 // Update product inventory
 export const updateProductInventory = async (orderId) => {
