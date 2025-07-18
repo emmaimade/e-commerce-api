@@ -49,6 +49,7 @@ CREATE TABLE orders (
 	payment_ref TEXT,
 	shipping_address_id UUID REFERENCES addresses(id);
 	payment_method TEXT;
+    order_status TEXT NOT NULL DEFAULT 'pending',
 	placed_at TIMESTAMPTZ DEFAULT now(),
 	updated_at TIMESTAMPTZ DEFAULT now()
 );
