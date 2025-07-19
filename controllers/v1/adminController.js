@@ -3,6 +3,7 @@ import axios from "axios";
 import db from "../../config/db.js";
 import { updateProductInventory } from "./paymentController.js";
 import { uploadMultipleToCloudinary, deleteFromCloudinary } from "../../utils/cloudinaryUpload.js";
+import { getNextDayString, isValidDateFormat} from "../../utils/dateHelpers.js";
 
 
 // ========================================
@@ -1165,12 +1166,27 @@ export const getPaymentLogs = async (req, res) => {
       paramIndex++;
     }
 
+    // Validate dates first
+    if (date_from && !isValidDateFormat(date_from)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid date format. Please use YYYY-MM-DD format.",
+        example: "2024-01-15"
+      })
+    }
+
+    if (date_to && !isValidDateFormat(date_to)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid date format. Please use YYYY-MM-DD format.",
+        example: "2024-01-15"
+      })
+    }
+
     // Filter by date range
     if (date_from && date_to) {
-      const nextDay = new Date(date_to);
-      nextDay.setDate(nextDay.getDate() + 1);
-      console.log(nextDay);
-      const nextDayString = nextDay.toISOString().split("T")[0];
+      const nextDayString = getNextDayString(date_to);
+      console.log(nextDayString);
 
       whereClause += ` AND pl.created_at >= $${paramIndex} AND pl.created_at < $${paramIndex + 1}`;
       queryParams.push(date_from, nextDayString);
@@ -1180,10 +1196,8 @@ export const getPaymentLogs = async (req, res) => {
       queryParams.push(date_from);
       paramIndex++;
     } else if (date_to) {
-      const nextDay = new Date(date_to);
-      nextDay.setDate(nextDay.getDate() + 1);
-      console.log(nextDay);
-      const nextDayString = nextDay.toISOString().split("T")[0];
+      const nextDayString = getNextDayString(date_to);
+      console.log(nextDayString);
 
       whereClause += ` AND pl.created_at <= $${paramIndex}`;
       queryParams.push(nextDayString);
@@ -1320,7 +1334,7 @@ export const getPaymentLogs = async (req, res) => {
           cancelled_transactions: parseInt(stats.cancelled_transactions),
           refunded_transactions: parseInt(stats.refunded_transactions),
           total_successful_amount: parseFloat(stats.total_successful_amount),
-          success_rate: stats.total_transactions > 0 ? (stats.successful_transactions / stats.total_transactions) * 100 : 0
+          success_rate: stats.total_transactions > 0 ? ((stats.successful_transactions / stats.total_transactions) * 100 ).toFixed(2): 0
         },
         filters_applied: {
           status: status || null,
