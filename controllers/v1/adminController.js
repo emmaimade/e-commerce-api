@@ -1116,3 +1116,234 @@ export const getPaymentStatusAdmin = async (req, res) => {
     });
   }
 };
+
+export const getPaymentLogs = async (req, res) => {
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const {
+      page = 1,
+      limit = 20,
+      status,
+      payment_method,
+      order_id,
+      date_from,
+      date_to,
+      search,
+    } = req.query;
+
+    // Validate pagination parameters
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+    const offset = (pageNum - 1) * limitNum;
+
+    // Build dynamic query
+    let whereClause = "WHERE 1 = 1";
+    const queryParams = [];
+    let paramIndex = 1;
+
+    // Filter by status
+    if (status) {
+      whereClause += ` AND pl.status = $${paramIndex}`;
+      queryParams.push(status);
+      paramIndex++;
+    }
+
+    // Filter by payment method
+    if (payment_method) {
+      whereClause += ` AND pl.payment_method = $${paramIndex}`;
+      queryParams.push(payment_method);
+      paramIndex++;
+    }
+
+    // Filter by order ID
+    if (order_id) {
+      whereClause += ` AND pl.order_id = $${paramIndex}`;
+      queryParams.push(order_id);
+      paramIndex++;
+    }
+
+    // Filter by date range
+    if (date_from && date_to) {
+      const nextDay = new Date(date_to);
+      nextDay.setDate(nextDay.getDate() + 1);
+      console.log(nextDay);
+      const nextDayString = nextDay.toISOString().split("T")[0];
+
+      whereClause += ` AND pl.created_at >= $${paramIndex} AND pl.created_at < $${paramIndex + 1}`;
+      queryParams.push(date_from, nextDayString);
+      paramIndex += 2;
+    } else if (date_from) {
+      whereClause += ` AND pl.created_at >= $${paramIndex}`;
+      queryParams.push(date_from);
+      paramIndex++;
+    } else if (date_to) {
+      const nextDay = new Date(date_to);
+      nextDay.setDate(nextDay.getDate() + 1);
+      console.log(nextDay);
+      const nextDayString = nextDay.toISOString().split("T")[0];
+
+      whereClause += ` AND pl.created_at <= $${paramIndex}`;
+      queryParams.push(nextDayString);
+      paramIndex++;
+    }
+
+    // Search functionality (payment_reference, customer email)
+    if (search) {
+      whereClause += ` AND (
+        pl.payment_reference ILIKE $${paramIndex} OR 
+        u.email ILIKE $${paramIndex}
+      )`;
+      queryParams.push(`%${search}%`);
+      paramIndex++;
+    }
+
+    // Build payment logs query
+    const logsQuery = `
+      SELECT
+        pl.id,
+        pl.order_id,
+        pl.payment_reference,
+        pl.status,
+        pl.amount,
+        pl.payment_method,
+        pl.processed_by,
+        pl.failure_reason,
+        pl.gateway_response,
+        pl.created_at,
+        o.user_id,
+        o.order_status,
+        o.total as order_total,
+        u.email as customer_email,
+        u.name as customer_name,
+        a.city as shipping_city,
+        a.country as shipping_country
+      FROM payment_logs pl
+      LEFT JOIN orders o ON pl.order_id = o.id
+      LEFT JOIN users u ON o.user_id = u.id
+      LEFT JOIN addresses a ON o.shipping_address_id = a.id
+      ${whereClause}
+      ORDER BY pl.created_at DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `;
+
+    queryParams.push(limitNum, offset);
+
+    // Count query for pagination
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM payment_logs pl
+      LEFT JOIN orders o ON pl.order_id = o.id
+      LEFT JOIN users u ON o.user_id = u.id
+      LEFT JOIN addresses a ON o.shipping_address_id = a.id
+      ${whereClause}
+    `;
+
+    const countParams = queryParams.slice(0, -2); // Exclude limit and offset
+
+    // Execute both queries
+    const [logsResult, countResult] = await Promise.all([
+      client.query(logsQuery, queryParams),
+      client.query(countQuery, countParams),
+    ]);
+
+    const logs = logsResult.rows;
+    const totalRecords = parseInt(countResult.rows[0].total);
+    const totalPages = Math.ceil(totalRecords / limitNum);
+
+    // Calculate Summary statistics
+    const statsQuery = `
+      SELECT 
+        COUNT(*) as total_transactions,
+        SUM(CASE WHEN pl.status = 'paid' THEN pl.amount ELSE 0 END) as total_successful_amount,
+        COUNT(CASE WHEN pl.status = 'paid' THEN 1 END) as successful_transactions,
+        COUNT(CASE WHEN pl.status = 'failed' THEN 1 END) as failed_transactions,
+        COUNT(CASE WHEN pl.status = 'pending' THEN 1 END) as pending_transactions,
+        COUNT(CASE WHEN pl.status = 'cancelled' THEN 1 END) as cancelled_transactions,
+        COUNT(CASE WHEN pl.status = 'refunded' THEN 1 END) as refunded_transactions
+      FROM payment_logs pl
+      LEFT JOIN orders o ON pl.order_id = o.id
+      LEFT JOIN users u ON o.user_id = u.id
+      LEFT JOIN addresses a ON o.shipping_address_id = a.id
+      ${whereClause}
+    `;
+    
+    const statsResult = await client.query(statsQuery, countParams);
+    const stats = statsResult.rows[0];
+
+    // Format response
+    const formattedLogs = logs.map((log) => ({
+      id: log.id,
+      order_id: log.order_id,
+      payment_reference: log.payment_reference,
+      status: log.status,
+      amount: log.amount,
+      payment_method: log.payment_method,
+      processed_by: log.processed_by,
+      created_at: log.created_at,
+      customer: {
+        id: log.user_id,
+        email: log.customer_email,
+        name: log.customer_name
+      },
+      order: {
+        status: log.order_status,
+        total: log.order_total,
+        shipping_location: log.shipping_city && log.shipping_country ? `${log.shipping_city}, ${log.shipping_country}` : null
+      },
+      failure_reason: log.failure_reason,
+      gateway_response: log.gateway_response,
+    }));
+
+    // Commit transaction
+    await client.query("COMMIT");
+
+    res.status(200).json({
+      success: true,
+      data: {
+        logs: formattedLogs,
+        pagination: {
+          current_page: pageNum,
+          total_pages: totalPages,
+          total_records: totalRecords,
+          per_page: limitNum,
+          has_next_page: pageNum < totalPages,
+          has_prev_page: pageNum > 1
+        },
+        statistics: {
+          total_transactions: parseInt(stats.total_transactions),
+          successful_transactions: parseInt(stats.successful_transactions),
+          failed_transactions: parseInt(stats.failed_transactions),
+          pending_transactions: parseInt(stats.pending_transactions),
+          cancelled_transactions: parseInt(stats.cancelled_transactions),
+          refunded_transactions: parseInt(stats.refunded_transactions),
+          total_successful_amount: parseFloat(stats.total_successful_amount),
+          success_rate: stats.total_transactions > 0 ? (stats.successful_transactions / stats.total_transactions) * 100 : 0
+        },
+        filters_applied: {
+          status: status || null,
+          payment_method: payment_method || null,
+          order_id: order_id || null,
+          date_range: {
+            from: date_from || null,
+            to: date_to || null
+          },
+          search: search || null,
+        }
+      }
+    })
+  } catch (err) {
+    console.error("Error fetching payment logs:", err);
+
+    await client.query("ROLLBACK");
+    res.status(500).json({ 
+      success: false, 
+      message: "Failed to fetch payment logs",
+      error: err.message 
+    });
+  } finally {
+    client.release();
+  }
+};
