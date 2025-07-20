@@ -9,6 +9,7 @@ import {
   updateOrderStatus,
   getPaymentStatusAdmin,
   getPaymentLogs,
+  getPaymentAnalytics,
   addProduct,
   updateProduct,
   deleteProductImage,
@@ -42,5 +43,6 @@ router.put("/orders/:id/status", adminAuth, updateOrderStatus);
 // PAYMENTS
 router.get("/payments/status/:reference", adminAuth, getPaymentStatusAdmin);
 router.get("/payments/logs", adminAuth, getPaymentLogs);
+router.get("/payments/analytics", adminAuth, getPaymentAnalytics);  
 
 export default router;

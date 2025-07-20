@@ -1361,3 +1361,77 @@ export const getPaymentLogs = async (req, res) => {
     client.release();
   }
 };
+
+export const getPaymentAnalytics = async (req, res) => {
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+
+    const { period = '30d' } = req.query;
+
+    let dateFilter = ''; 
+    if (period === '7d') {
+      dateFilter = "AND pl.created_at >= NOW() - INTERVAL '7 days'";
+    } else if (period === '30d') {
+      dateFilter = "AND pl.created_at >= NOW() - INTERVAL '30 days'";
+    } else if (period === '90d') {
+      dateFilter = "AND pl.created_at >= NOW() - INTERVAL '90 days'";
+    } else if (period === '1y') {
+      dateFilter = "AND pl.created_at >= NOW() - INTERVAL '1 year'";
+    }
+
+    // Revenue analytics
+    const analyticsQuery = `
+      SELECT
+        DATE_TRUNC('day', pl.created_at) as date,
+        COUNT(*) as total_transactions,
+        COUNT(CASE WHEN pl.status = 'paid' THEN 1 END) as successful_transactions,
+        SUM(CASE WHEN pl.status = 'paid' THEN amount ELSE 0 END) as daily_revenue,
+        AVG(CASE WHEN pl.status = 'paid' THEN amount END) as avg_transaction_value
+      FROM payment_logs pl
+      WHERE 1=1 ${dateFilter}
+      GROUP BY DATE_TRUNC('day', created_at)
+      ORDER BY date DESC
+    `;
+
+    // Payment method
+    const methodQuery = `
+      SELECT
+        payment_method,
+        COUNT(*) as count,
+        SUM(CASE WHEN status = 'paid' THEN amount END) as total_amount
+      FROM payment_logs pl
+      WHERE status = 'paid' ${dateFilter}
+      GROUP BY payment_method
+      ORDER BY total_amount DESC
+    `;
+
+    const [analyticsResult, methodResult] = await Promise.all([
+      client.query(analyticsQuery),
+      client.query(methodQuery)
+    ]);
+
+    // Commit transaction
+    await client.query("COMMIT");
+
+    res.status(200).json({
+      success: true,
+      data: {
+        daily_analytics: analyticsResult.rows,
+        payment_methods: methodResult.rows,
+        period: period
+      }
+    });
+  } catch (err) {
+    console.error("Error fetching payment analytics:", err);
+
+    await client.query("ROLLBACK");
+    res.status(500).json({ 
+      success: false, 
+      message: "Failed to fetch payment analytics",
+      error: err.message 
+    });
+  } finally {
+    client.release();
+  }
+}
