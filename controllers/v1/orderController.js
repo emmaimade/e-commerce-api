@@ -196,46 +196,166 @@ export const createOrder = async (req, res) => {
       const mailOptions = {
         from: `E-commerce API <${process.env.EMAIL_USER}>`,
         to: req.user.email,
-        subject: "Order Confirmation - Your Order Has Been Placed",
+        subject: "Order Confirmation - Complete Your Payment",
         html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2>Order Confirmation</h2>
-            <p>Hi ${req.user.name || "Valued Customer"},</p>
-            <p>Thank you for your order! We've received your order and will process it once payment is confirmed.</p>
-        
-            <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
-              <h3>Order Details</h3>
-              <p><strong>Order ID:</strong> ${order.id}</p>
-              <p><strong>Total:</strong> ₦${(total).toLocaleString()}</p>
-              <p><strong>Status:</strong> Pending Payment</p>
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <!-- Header -->
+            <div style="text-align: center; border-bottom: 2px solid #007bff; padding-bottom: 20px; margin-bottom: 30px;">
+              <h1 style="color: #333; margin: 0;">📦 Order Confirmation</h1>
+              <p style="color: #666; margin: 5px 0;">Your order has been received and is awaiting payment</p>
             </div>
+
+            <!-- Greeting -->
+            <p style="font-size: 16px;">Hi ${req.user.name || "Valued Customer"},</p>
+            <p>Thank you for your order! We've received your order details and reserved your items. Please complete your payment to secure your purchase.</p>
             
-            <h3>Items Ordered:</h3>
-            <ul>
-              ${cartResult.rows.map(item => `
-                <li>${item.name} - Qty: ${item.quantity} - ₦${(item.price).toLocaleString()}</li>
-              `).join('')}
-            </ul>
-      
+            <!-- Payment Alert Banner -->
+            <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; color: #856404; padding: 15px; border-radius: 8px; margin: 20px 0; text-align: center;">
+              <strong>⏰ Payment Required</strong><br>
+              <span style="font-size: 14px;">Complete your payment within 24 hours to secure your order</span>
+            </div>
+
+            <!-- Order Details Card -->
+            <div style="background-color: #f8f9fa; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 4px solid #007bff;">
+              <h3 style="margin-top: 0; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Order Details</h3>
+              <table style="width: 100%; border-collapse: collapse;">
+                <tr>
+                  <td style="padding: 10px 0; font-weight: bold; color: #555;">Order ID:</td>
+                  <td style="padding: 10px 0; color: #007bff; font-weight: bold;">#${
+                    order.id
+                  }</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px 0; font-weight: bold; color: #555;">Order Status:</td>
+                  <td style="padding: 10px 0;">
+                    <span style="background-color: #ffc107; color: #000; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">
+                      PENDING PAYMENT
+                    </span>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px 0; font-weight: bold; color: #555;">Order Date:</td>
+                  <td style="padding: 10px 0;">${new Date().toLocaleDateString(
+                    "en-US",
+                    {
+                      year: "numeric",
+                      month: "long",
+                      day: "numeric",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    }
+                  )}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px 0; font-weight: bold; color: #555;">Total Amount:</td>
+                  <td style="padding: 10px 0; font-size: 18px; color: #28a745; font-weight: bold;">
+                    ₦${total.toLocaleString()}
+                  </td>
+                </tr>
+              </table>
+            </div>
+
+            <!-- Items Ordered Section -->
+            <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 25px 0;">
+              <h3 style="margin-top: 0; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Items Ordered</h3>
+              <div style="max-height: 300px; overflow-y: auto;">
+                ${cartResult.rows
+                  .map(
+                    (item) => `
+                      <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #eee;">
+                        <div style="flex: 1;">
+                          <strong style="color: #333;">${item.name}</strong><br>
+                          <span style="color: #666; font-size: 14px;">Quantity: ${
+                            item.quantity
+                          }</span>
+                        </div>
+                        <div style="text-align: right; font-weight: bold; color: #007bff;">
+                          ₦${(item.price * item.quantity).toLocaleString()}
+                        </div>
+                      </div>
+                    `
+                  )
+                  .join("")}
+              </div>
+              
+              <!-- Order Summary -->
+              <div style="margin-top: 20px; padding-top: 15px; border-top: 2px solid #007bff;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <strong style="font-size: 16px;">Total:</strong>
+                  <strong style="font-size: 18px; color: #28a745;">₦${total.toLocaleString()}</strong>
+                </div>
+              </div>
+            </div>
+
             <!-- Payment Link Section -->
-            <div style="background-color: #e8f4f8; padding: 20px; border-radius: 5px; margin: 20px 0; text-align: center;">
-              <h3 style="color: #2c5aa0;">Complete Your Payment</h3>
-              <p>Click the button below to complete your payment securely:</p>
+            <div style="background-color: #e8f4f8; padding: 25px; border-radius: 10px; margin: 25px 0; text-align: center; border: 2px dashed #007bff;">
+              <h3 style="color: #2c5aa0; margin-top: 0;">💳 Complete Your Payment</h3>
+              <p style="margin-bottom: 20px; color: #555;">Click the button below to complete your payment securely with Paystack:</p>
               <a href="${paymentResponse.data.data.authorization_url}" 
-                style="display: inline-block; background-color: #007bff; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; font-weight: bold; margin: 10px 0;">
-                💳 Pay Now - ₦${(total).toLocaleString()}
+                style="display: inline-block; background-color: #007bff; color: white; padding: 15px 40px; text-decoration: none; border-radius: 8px; font-weight: bold; margin: 10px 0; font-size: 16px; transition: background-color 0.3s;">
+                🔒 Pay Securely - ₦${total.toLocaleString()}
               </a>
-              <p style="font-size: 12px; color: #666;">
-                This link will expire in 24 hours for security reasons.
+              <div style="margin-top: 15px; padding: 10px; background-color: #fff; border-radius: 5px;">
+                <p style="font-size: 12px; color: #666; margin: 0;">
+                  🛡️ <strong>Secure Payment:</strong> Your payment is protected by 256-bit SSL encryption<br>
+                  ⏰ <strong>Expires:</strong> This payment link will expire in 24 hours
+                </p>
+              </div>
+            </div>
+
+            <!-- Important Information -->
+            <div style="background-color: #d1ecf1; border: 1px solid #bee5eb; padding: 15px; border-radius: 8px; margin: 25px 0;">
+              <h4 style="margin-top: 0; color: #0c5460;">📋 Important Information</h4>
+              <ul style="margin: 10px 0; padding-left: 20px; color: #0c5460; line-height: 1.6;">
+                <li>Your items have been reserved and will be held for 24 hours</li>
+                <li>You'll receive a payment confirmation email once payment is completed</li>
+                <li>Your order will be processed immediately after payment confirmation</li>
+                <li>Estimated processing time: 1-2 business days after payment</li>
+              </ul>
+            </div>
+
+            <!-- Support Section -->
+            <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 25px 0;">
+              <h4 style="margin-top: 0; color: #333;">Need Help? 🤝</h4>
+              <p style="margin-bottom: 10px;">Our customer support team is here to help:</p>
+              <ul style="list-style: none; padding-left: 0;">
+                <li style="margin: 8px 0;">📧 <strong>Email:</strong> ${
+                  process.env.EMAIL_USER
+                }</li>
+                <li style="margin: 8px 0;">📞 <strong>Phone:</strong> +234-XXX-XXXX-XXX</li>
+                <li style="margin: 8px 0;">💬 <strong>Live Chat:</strong> Available on our website</li>
+              </ul>
+              <p style="font-size: 14px; color: #666; margin-bottom: 0;">
+                Please reference Order ID <strong>#${
+                  order.id
+                }</strong> when contacting support.
               </p>
             </div>
-      
-            <p><strong>Important:</strong> Your order will be processed once payment is confirmed. You'll receive another email with payment confirmation.</p>
-      
-            <p>If you have any questions, please contact our support team with your Order ID: ${order.id}</p>
-            
-            <p>Thank you for shopping with us!</p>
-            <p>Best regards,<br>The E-commerce API Team</p>
+
+            <!-- Track Order Section -->
+            <div style="text-align: center; margin: 30px 0;">
+              <p>Want to track your order?</p>
+              <a href="${process.env.BASE_URL}/v1/order/${order.id}/history" 
+                style="display: inline-block; background-color: #28a745; color: white; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: bold;">
+                📍 Track Your Order
+              </a>
+            </div>
+
+            <!-- Footer -->
+            <div style="text-align: center; padding-top: 30px; border-top: 1px solid #ddd; margin-top: 40px;">
+              <p style="font-size: 18px; margin-bottom: 10px;">Thank you for choosing us! 🛍️</p>
+              <p style="color: #666; margin-bottom: 20px;">
+                Best regards,<br>
+                <strong>The E-commerce API Team</strong>
+              </p>
+              
+              <!-- Email Footer -->
+              <div style="font-size: 12px; color: #999; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
+                <p>This email was sent to <strong>${req.user.email}</strong></p>
+                <p>© 2024 E-commerce API. All rights reserved.</p>
+                <p>If you didn't place this order, please contact us immediately.</p>
+              </div>
+            </div>
           </div>
         `,
       };
@@ -956,49 +1076,199 @@ export const cancelOrder = async (req, res) => {
 
     // Email notification
     let refundMessage = "";
+    let refundStatusBadge = "";
+    let refundIcon = "";
+
     if (refundProcessed) {
       if (refundData.status === "processed") {
-        refundMessage =
-          "<p>Your refund has been processed successfully and should reflect in your account within 1-3 working days.</p>";
+        refundIcon = "✅";
+        refundStatusBadge = `<span style="background-color: #d4edda; color: #155724; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">REFUND PROCESSED</span>`;
+        refundMessage = `
+          <div style="background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; padding: 15px; border-radius: 8px; margin: 20px 0;">
+            <strong>💰 Refund Successfully Processed</strong>
+            <p style="margin: 10px 0 0 0;">Your refund has been processed successfully and should reflect in your account within 1-3 working days depending on your bank.</p>
+          </div>`;
       } else if (refundData.status === "pending") {
-        refundMessage =
-          "<p>A refund has been initiated and will be processed within 5-7 working days.</p>";
+        refundIcon = "⏳";
+        refundStatusBadge = `<span style="background-color: #fff3cd; color: #856404; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">REFUND PENDING</span>`;
+        refundMessage = `
+          <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; color: #856404; padding: 15px; border-radius: 8px; margin: 20px 0;">
+            <strong>⏳ Refund In Progress</strong>
+            <p style="margin: 10px 0 0 0;">A refund has been initiated and is being processed. You should receive your refund within 5-7 working days.</p>
+          </div>`;
+      } else if (refundData.status === "already_processed") {
+        refundIcon = "✅";
+        refundStatusBadge = `<span style="background-color: #d4edda; color: #155724; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">ALREADY REFUNDED</span>`;
+        refundMessage = `
+          <div style="background-color: #d1ecf1; border: 1px solid #bee5eb; color: #0c5460; padding: 15px; border-radius: 8px; margin: 20px 0;">
+            <strong>ℹ️ Refund Already Processed</strong>
+            <p style="margin: 10px 0 0 0;">This transaction was already fully reversed. If you don't see the refund in your account, please contact your bank.</p>
+          </div>`;
       } else {
-        refundMessage =
-          "<p>Your refund is being processed and will be completed within 5-7 working days.</p>";
+        refundIcon = "🔄";
+        refundStatusBadge = `<span style="background-color: #e2e3e5; color: #383d41; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">PROCESSING</span>`;
+        refundMessage = `
+          <div style="background-color: #e2e3e5; border: 1px solid #d6d8db; color: #383d41; padding: 15px; border-radius: 8px; margin: 20px 0;">
+            <strong>🔄 Refund Being Processed</strong>
+            <p style="margin: 10px 0 0 0;">Your refund is being processed and will be completed within 5-7 working days.</p>
+          </div>`;
       }
     } else if (refundError) {
+      refundIcon = "⚠️";
+      refundStatusBadge = `<span style="background-color: #f8d7da; color: #721c24; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">MANUAL PROCESSING</span>`;
       refundMessage = `
-          <p>We encountered a technical issue while processing your refund automatically. Don't worry - your refund is guaranteed!</p>
-          <p><strong>Next steps:</strong></p>
-          <ul>
-            <li>Our support team has been notified and will process your refund manually</li>
-            <li>You'll receive your refund within 2-3 business days</li>
-            <li>If you don't see the refund by then, please contact us with your order ID</li>
-          </ul>
-          <p>We apologize for any inconvenience this may cause.</p>
-        `;
+        <div style="background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; padding: 15px; border-radius: 8px; margin: 20px 0;">
+          <strong>⚠️ Refund Requires Manual Processing</strong>
+          <p style="margin: 10px 0;">We encountered a technical issue while processing your refund automatically. Don't worry - your refund is guaranteed!</p>
+          
+          <div style="background-color: #fff; padding: 15px; border-radius: 5px; margin: 10px 0;">
+            <h4 style="margin-top: 0; color: #721c24;">📋 Next Steps:</h4>
+            <ul style="margin: 10px 0; padding-left: 20px;">
+              <li>Our support team has been notified and will process your refund manually</li>
+              <li>You'll receive your refund within 2-3 business days</li>
+              <li>If you don't see the refund by then, please contact us with your order ID</li>
+            </ul>
+          </div>
+          
+          <p style="margin: 10px 0 0 0;">We apologize for any inconvenience this may cause.</p>
+        </div>`;
     } else {
-      refundMessage =
-        "<p>Since no payment was made for this order, no refund is required.</p>";
+      refundIcon = "ℹ️";
+      refundStatusBadge = `<span style="background-color: #d1ecf1; color: #0c5460; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">NO PAYMENT</span>`;
+      refundMessage = `
+        <div style="background-color: #d1ecf1; border: 1px solid #bee5eb; color: #0c5460; padding: 15px; border-radius: 8px; margin: 20px 0;">
+          <strong>ℹ️ No Refund Required</strong>
+          <p style="margin: 10px 0 0 0;">Since no payment was made for this order, no refund is required. Your order has been cancelled successfully.</p>
+        </div>`;
     }
 
     const mailOptions = {
       from: `E-Commerce API <${process.env.EMAIL_USER}>`,
       to: order.email,
-      subject: "Order Cancellation Notification",
+      subject: "Order Cancellation Confirmed",
       html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2>Order Cancellation Notification</h2>
-          <p>Dear ${order.name},</p>
-          <p>Your order (ID: ${orderId}) has been successfully cancelled. Please find the details below:</p>
-          <p><strong>Order ID:</strong> ${order.id}</p>
-          <p><strong>Order Total:</strong> NGN ${order.total.toLocaleString()}</p> 
-          <p><strong>Cancellation Date:</strong> ${new Date().toLocaleDateString()}</p>     
-          ${refundMessage}
-          <p>Thank you for shopping with us</p><br>
-          <p>Best regards</p>
-          <p>The E-Commerce API Team</p>
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <!-- Header -->
+          <div style="text-align: center; border-bottom: 2px solid #dc3545; padding-bottom: 20px; margin-bottom: 30px;">
+            <h1 style="color: #dc3545; margin: 0;">❌ Order Cancelled</h1>
+            <p style="color: #666; margin: 5px 0;">Your order has been successfully cancelled</p>
+          </div>
+
+          <!-- Greeting -->
+          <p style="font-size: 16px;">Dear ${order.name || "Valued Customer"},</p>
+          <p>Your order cancellation request has been processed successfully. We're sorry to see you go, but we understand that plans can change.</p>
+
+          <!-- Order Details Card -->
+          <div style="background-color: #f8f9fa; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 4px solid #dc3545;">
+            <h3 style="margin-top: 0; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Cancelled Order Details</h3>
+            <table style="width: 100%; border-collapse: collapse;">
+              <tr>
+                <td style="padding: 10px 0; font-weight: bold; color: #555;">Order ID:</td>
+                <td style="padding: 10px 0; color: #dc3545; font-weight: bold;">#${
+                  order.id
+                }</td>
+              </tr>
+              <tr>
+                <td style="padding: 10px 0; font-weight: bold; color: #555;">Order Status:</td>
+                <td style="padding: 10px 0;">
+                  <span style="background-color: #dc3545; color: white; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">
+                    CANCELLED
+                  </span>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding: 10px 0; font-weight: bold; color: #555;">Original Total:</td>
+                <td style="padding: 10px 0; font-size: 16px; color: #333; font-weight: bold;">
+                  ₦${order.total.toLocaleString()}
+                </td>
+              </tr>
+              <tr>
+                <td style="padding: 10px 0; font-weight: bold; color: #555;">Cancellation Date:</td>
+                <td style="padding: 10px 0;">${new Date().toLocaleDateString(
+                  "en-US",
+                  {
+                    year: "numeric",
+                    month: "long",
+                    day: "numeric",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  }
+                )}</td>
+              </tr>
+              <tr>
+                <td style="padding: 10px 0; font-weight: bold; color: #555;">Refund Status:</td>
+                <td style="padding: 10px 0;">${refundStatusBadge}</td>
+              </tr>
+            </table>
+          </div>
+
+          <!-- Refund Information -->
+          <div style="margin: 25px 0;">
+            <h3 style="color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px;">
+              ${refundIcon} Refund Information
+            </h3>
+            ${refundMessage}
+          </div>
+
+          <!-- What Happens Next -->
+          <div style="background-color: #e8f4f8; padding: 20px; border-radius: 8px; margin: 25px 0;">
+            <h3 style="margin-top: 0; color: #2c5aa0;">📋 What Happens Next?</h3>
+            <ul style="padding-left: 20px; line-height: 1.6; color: #2c5aa0;">
+              <li>Your order has been completely removed from our system</li>
+              <li>All reserved inventory has been released back to stock</li>
+              <li>You will not be charged for this order</li>
+              ${
+                refundProcessed
+                  ? "<li>Your refund is being processed as detailed above</li>"
+                  : ""
+              }
+              <li>You're free to place a new order anytime</li>
+            </ul>
+          </div>
+
+          <!-- Support Section -->
+          <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 25px 0;">
+            <h4 style="margin-top: 0; color: #333;">Need Help? 🤝</h4>
+            <p style="margin-bottom: 10px;">If you have any questions about this cancellation or need assistance:</p>
+            <ul style="list-style: none; padding-left: 0;">
+              <li style="margin: 8px 0;">📧 <strong>Email:</strong> ${
+                process.env.EMAIL_USER
+              }</li>
+              <li style="margin: 8px 0;">📞 <strong>Phone:</strong> +234-XXX-XXXX-XXX</li>
+              <li style="margin: 8px 0;">💬 <strong>Live Chat:</strong> Available on our website</li>
+            </ul>
+            <p style="font-size: 14px; color: #666; margin-bottom: 0;">
+              Please reference Order ID <strong>#${
+                order.id
+              }</strong> when contacting support.
+            </p>
+          </div>
+
+          <!-- Come Back Section -->
+          <div style="text-align: center; margin: 30px 0; padding: 20px; background-color: #fff3cd; border-radius: 8px;">
+            <h4 style="margin-top: 0;">We'd Love to Have You Back! 💝</h4>
+            <p style="margin-bottom: 15px;">We're constantly adding new products and improving our service.</p>
+            <a href="${process.env.BASE_URL || "#"}" 
+              style="display: inline-block; background-color: #007bff; color: white; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: bold;">
+              🛍️ Continue Shopping
+            </a>
+          </div>
+
+          <!-- Footer -->
+          <div style="text-align: center; padding-top: 30px; border-top: 1px solid #ddd; margin-top: 40px;">
+            <p style="font-size: 16px; margin-bottom: 10px;">Thank you for giving us a try! 🙏</p>
+            <p style="color: #666; margin-bottom: 20px;">
+              We hope to serve you better in the future.<br>
+              <strong>The E-Commerce API Team</strong>
+            </p>
+            
+            <!-- Email Footer -->
+            <div style="font-size: 12px; color: #999; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
+              <p>This email was sent to <strong>${order.email}</strong></p>
+              <p>© 2024 E-Commerce API. All rights reserved.</p>
+              <p>If you have any concerns about this cancellation, please contact us immediately.</p>
+            </div>
+          </div>
         </div>
       `,
     };
