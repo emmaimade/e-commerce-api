@@ -179,7 +179,7 @@ export const updateProduct = async (req, res) => {
     }
 
     // Define allowed fields
-    const allowedFields = ["name", "price", "description", "inventory_qty"];
+    const allowedFields = ["name", "price", "description", "inventory_qty", "status"];
     const allowedUpdates = {};
 
     // Filter only allowed fields
@@ -290,19 +290,36 @@ export const updateProduct = async (req, res) => {
 
     // Validate inventory
     if (allowedUpdates.inventory_qty) {
+      const newQuantity = parseInt(allowedUpdates.inventory_qty);
+
       // check if inventory_qty is a number
-      if (isNaN(allowedUpdates.inventory_qty)) {
+      if (isNaN(newQuantity)) {
         return res.status(400).json({
           success: false,
           message: "Inventory must be a number",
         });
       }
+
+      const currentInventory = parseInt(existingProduct.rows[0].inventory_qty) || 0;
+
+      // Add newQuantity to existing inventory
+      const updatedInventory = currentInventory + newQuantity;
+
       // checks if inventory_qty is greater than one
-      if (allowedUpdates.inventory_qty <= 0) {
+      if (updatedInventory <= 0) {
         return res.status(400).json({
           success: false,
-          message: "Inventory must be greater than 0",
+          message: `Cannot reduce inventory below 0, current inventory: ${currentInventory}, attempted reduction: ${Math.abs(newQuantity)}`,
         });
+      }
+
+      // Update inventory
+      allowedUpdates.inventory_qty = updatedInventory;
+
+      if (parseInt(updatedInventory) > 0) {
+        allowedUpdates.status = 'active';
+      } else {
+        allowedUpdates.status = 'out_of_stock';
       }
     }
 
@@ -798,8 +815,9 @@ export const verifyPaymentAdmin = async (req, res) => {
 
     // Check if payment has already been verified
     if (order.status === "paid") {
+      await client.query("COMMIT");
       return res.status(409).json({
-        success: false,
+        success: true,
         message: "Payment already verified",
         data: {
           order: order,
@@ -807,6 +825,7 @@ export const verifyPaymentAdmin = async (req, res) => {
           payment_method: order.payment_method,
           customer_id: order.user_id,
           verification_type: "already_processed",
+          verified_at: order.updated_at,
         },
       });
     }
@@ -852,6 +871,7 @@ export const verifyPaymentAdmin = async (req, res) => {
       SET
         status = $1, 
         payment_method = $2, 
+        order_status = 'processing'
         updated_at = now()
       WHERE payment_ref = $3 AND status = 'pending'
       RETURNING *
@@ -991,7 +1011,7 @@ export const updateOrderStatus = async (req, res) => {
 
     const query = `
       UPDATE orders
-      SET order_status = $1, updated_at = NOW()
+        SET order_status = $1, updated_at = NOW()
       WHERE id = $2
       RETURNING *
     `;
