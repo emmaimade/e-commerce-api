@@ -200,20 +200,20 @@ export const createOrder = async (req, res) => {
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
             <h2>Order Confirmation</h2>
-            <p>Hi ${req.user.name},</p>
+            <p>Hi ${req.user.name || "Valued Customer"},</p>
             <p>Thank you for your order! We've received your order and will process it once payment is confirmed.</p>
         
             <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
               <h3>Order Details</h3>
               <p><strong>Order ID:</strong> ${order.id}</p>
-              <p><strong>Total:</strong> ₦${(total / 100).toLocaleString()}</p>
+              <p><strong>Total:</strong> ₦${(total).toLocaleString()}</p>
               <p><strong>Status:</strong> Pending Payment</p>
             </div>
             
             <h3>Items Ordered:</h3>
             <ul>
               ${cartResult.rows.map(item => `
-                <li>${item.name} - Qty: ${item.quantity} - ₦${(item.price / 100).toLocaleString()}</li>
+                <li>${item.name} - Qty: ${item.quantity} - ₦${(item.price).toLocaleString()}</li>
               `).join('')}
             </ul>
       
@@ -223,7 +223,7 @@ export const createOrder = async (req, res) => {
               <p>Click the button below to complete your payment securely:</p>
               <a href="${paymentResponse.data.data.authorization_url}" 
                 style="display: inline-block; background-color: #007bff; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; font-weight: bold; margin: 10px 0;">
-                Pay Now - ₦${(total / 100).toLocaleString()}
+                💳 Pay Now - ₦${(total).toLocaleString()}
               </a>
               <p style="font-size: 12px; color: #666;">
                 This link will expire in 24 hours for security reasons.
@@ -322,10 +322,18 @@ export const verifyPayment = async (req, res) => {
 
     // Check if payment has already been verified
     if (order.status === "paid") {
-      return res.status(400).json({
-        success: false,
-        message: "Payment has already been verified",
-      });
+      await client.query("COMMIT");
+      return res.status(200).json({
+        success: true,
+        message: 'Payment has already been verified',
+        data: {
+          order: order,
+          payment_status: "paid",
+          payment_method: order.payment_method,
+          verified_at: order.updated_at,
+          verified_by: "webhook"
+        }
+      })
     }
 
     // Verify payment with paystack using axios
@@ -362,7 +370,8 @@ export const verifyPayment = async (req, res) => {
       UPDATE orders
       SET
         status = $1, 
-        payment_method = $2, 
+        payment_method = $2,
+        order_status = CASE WHEN $1 = 'paid' THEN 'processing' ELSE order_status END, 
         updated_at = now()
       WHERE payment_ref = $3
       RETURNING *
@@ -374,10 +383,12 @@ export const verifyPayment = async (req, res) => {
         reference,
       ]);
 
+      const updatedOrder = result.rows[0];
+
       if (paymentStatus === "paid") {
         // Update Product Inventory
         try {
-          await updateProductInventory(result.rows[0].id);
+          await updateProductInventory(updatedOrder.id);
           console.log("Inventory updated successfully");
         } catch (inventoryError) {
           console.log("Inventory update failed:", inventoryError.message);
@@ -386,31 +397,32 @@ export const verifyPayment = async (req, res) => {
         // Delete cart items
         await client.query(
           `
-        DELETE FROM cart_items 
-        WHERE cart_id IN (SELECT id from carts WHERE user_id = $1)`,
+            DELETE FROM cart_items 
+            WHERE cart_id IN (SELECT id from carts WHERE user_id = $1)
+          `,
           [userId]
         );
 
+        console.log("Cleared cart");
+
         // Log the payment transaction for audit trail
         await client.query(
-          `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
-        ON CONFLICT (payment_reference) DO NOTHING`,
+          `
+            INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+            ON CONFLICT (payment_reference) DO NOTHING
+          `,
           [
-            result.rows[0].id,
+            updatedOrder.id,
             reference,
             paymentStatus,
-            result.rows[0].total,
+            updatedOrder.total,
             paymentMethod,
             "user",
             JSON.stringify(data.gateway_response) || "Payment successful",
           ]
         );
 
-        // Update order_status in orders
-        await db.query(
-          `UPDATE orders SET order_status = 'processing', updated_at = now() WHERE id = $1`,
-          [result.rows[0].id]
-        );
+        console.log("Payment transaction logged");
 
         // Update order status history
         await client.query(
@@ -418,11 +430,170 @@ export const verifyPayment = async (req, res) => {
             INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)
           `,
           [
-            result.rows[0].id,
+            updatedOrder.id,
             "processing",
             "Payment verified and order is being processed",
           ]
         );
+
+        console.log("Order status history updated");
+
+        // Send Payment Confirmation Email
+        const transporter = createTransporter();
+
+        // Email options
+        const mailOptions = {
+          from: `E-commerce API <${process.env.EMAIL_USER}>`,
+          to: customer.email,
+          subject: "Payment Confirmed - Your Order is Being Processed",
+          html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <!-- Header -->
+          <div style="text-align: center; border-bottom: 2px solid #28a745; padding-bottom: 20px; margin-bottom: 30px;">
+            <h1 style="color: #333; margin: 0;">✅ Payment Confirmed!</h1>
+            <p style="color: #666; margin: 5px 0;">Your order is now being processed</p>
+          </div>
+
+          <!-- Greeting -->
+          <p style="font-size: 16px;">Hi ${
+            req.user.name || "Valued Customer"
+          },</p>
+          <p>Great news! Your payment for order <strong>#${
+            updatedOrder.id
+          }</strong> has been successfully confirmed. Your order is now being processed and will be prepared for shipment.</p>
+          
+          <!-- Success Banner -->
+          <div style="background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; padding: 15px; border-radius: 8px; margin: 20px 0; text-align: center;">
+            <strong>🎉 Payment Successfully Processed</strong>
+          </div>
+
+          <!-- Order Details Card -->
+          <div style="background-color: #f8f9fa; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 4px solid #28a745;">
+            <h3 style="margin-top: 0; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Payment & Order Details</h3>
+            <table style="width: 100%; border-collapse: collapse;">
+              <tr>
+                <td style="padding: 10px 0; font-weight: bold; color: #555;">Order ID:</td>
+                <td style="padding: 10px 0; color: #007bff; font-weight: bold;">#${
+                  updatedOrder.id
+                }</td>
+              </tr>
+              <tr>
+                <td style="padding: 10px 0; font-weight: bold; color: #555;">Order Status:</td>
+                <td style="padding: 10px 0;">
+                  <span style="background-color: #ffc107; color: #000; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">
+                    ${updatedOrder.order_status.toUpperCase()}
+                  </span>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding: 10px 0; font-weight: bold; color: #555;">Payment Reference:</td>
+                <td style="padding: 10px 0; font-family: monospace; background-color: #e9ecef; padding: 5px 8px; border-radius: 4px;">${reference}</td>
+              </tr>
+              <tr>
+                <td style="padding: 10px 0; font-weight: bold; color: #555;">Payment Method:</td>
+                <td style="padding: 10px 0; text-transform: capitalize;">${paymentMethod}</td>
+              </tr>
+              <tr>
+                <td style="padding: 10px 0; font-weight: bold; color: #555;">Amount Paid:</td>
+                <td style="padding: 10px 0; font-size: 18px; color: #28a745; font-weight: bold;">
+                  ₦${updatedOrder.total.toLocaleString()}
+                </td>
+              </tr>
+              <tr>
+                <td style="padding: 10px 0; font-weight: bold; color: #555;">Payment Date:</td>
+                <td style="padding: 10px 0;">${new Date().toLocaleDateString(
+                  "en-US",
+                  {
+                    year: "numeric",
+                    month: "long",
+                    day: "numeric",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  }
+                )}</td>
+              </tr>
+            </table>
+          </div>
+
+          <!-- Next Steps -->
+          <div style="background-color: #e8f4f8; padding: 20px; border-radius: 8px; margin: 25px 0;">
+            <h3 style="margin-top: 0; color: #2c5aa0;">📦 What Happens Next?</h3>
+            <ol style="padding-left: 20px; line-height: 1.6;">
+              <li><strong>Order Processing</strong> - We're preparing your items for shipment</li>
+              <li><strong>Quality Check</strong> - Each item is carefully inspected</li>
+              <li><strong>Packaging</strong> - Your order will be securely packaged</li>
+              <li><strong>Shipping</strong> - You'll receive tracking information via email</li>
+              <li><strong>Delivery</strong> - Your order will arrive at your specified address</li>
+            </ol>
+            <p style="margin-bottom: 0; font-size: 14px; color: #666;">
+              <strong>Estimated processing time:</strong> 1-2 business days
+            </p>
+          </div>
+
+          <!-- Track Order Section -->
+          <div style="text-align: center; margin: 30px 0;">
+            <p>Want to track your order?</p>
+            <a href="${process.env.BASE_URL}/v1/order/${updatedOrder.id}/history" 
+              style="display: inline-block; background-color: #007bff; color: white; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: bold;">
+              Track Your Order
+            </a>
+          </div>
+
+          <!-- Support Section -->
+          <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 25px 0;">
+            <h4 style="margin-top: 0; color: #333;">Need Help? 🤝</h4>
+            <p style="margin-bottom: 10px;">Our customer support team is here to help:</p>
+            <ul style="list-style: none; padding-left: 0;">
+              <li style="margin: 8px 0;">📧 <strong>Email:</strong> ${
+                process.env.EMAIL_USER
+              }</li>
+              <li style="margin: 8px 0;">📞 <strong>Phone:</strong> +234-XXX-XXXX-XXX</li>
+              <li style="margin: 8px 0;">💬 <strong>Live Chat:</strong> Available on our website</li>
+            </ul>
+            <p style="font-size: 14px; color: #666; margin-bottom: 0;">
+              Please reference Order ID <strong>#${
+                updatedOrder.id
+              }</strong> when contacting support.
+            </p>
+          </div>
+
+          <!-- Social Media & Reviews -->
+          <div style="text-align: center; margin: 30px 0; padding: 20px; background-color: #fff3cd; border-radius: 8px;">
+            <h4 style="margin-top: 0;">Love your purchase? 💝</h4>
+            <p style="margin-bottom: 15px;">Share your experience and help others discover great products!</p>
+            <div style="margin: 15px 0;">
+              <a href="#" style="text-decoration: none; margin: 0 10px; font-size: 24px;">📘</a>
+              <a href="#" style="text-decoration: none; margin: 0 10px; font-size: 24px;">📷</a>
+              <a href="#" style="text-decoration: none; margin: 0 10px; font-size: 24px;">🐦</a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <div style="text-align: center; padding-top: 30px; border-top: 1px solid #ddd; margin-top: 40px;">
+            <p style="font-size: 18px; margin-bottom: 10px;">Thank you for shopping with us! 🛍️</p>
+            <p style="color: #666; margin-bottom: 20px;">
+              Best regards,<br>
+              <strong>The E-commerce API Team</strong>
+            </p>
+            
+            <!-- Email Footer -->
+            <div style="font-size: 12px; color: #999; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
+              <p>This email was sent to <strong>${req.user.email}</strong></p>
+              <p>© 2024 E-commerce API. All rights reserved.</p>
+              <p>If you have any concerns about this transaction, please contact us immediately.</p>
+            </div>
+          </div>
+        </div>
+      `,
+        };
+
+        // Send email
+        try {
+          await transporter.sendMail(mailOptions);
+          console.log("Payment Confirmation Email sent successfully");
+        } catch (emailError) {
+          console.log("Email sending failed:", emailError.message);
+        }
       } else {
         // Log the failed payment
         await client.query(
@@ -430,7 +601,7 @@ export const verifyPayment = async (req, res) => {
         VALUES ($1, $2, $3, $4, $5, now())
         ON CONFLICT (payment_reference) DO NOTHING`,
           [
-            result.rows[0].id,
+            updatedOrder.id,
             reference,
             paymentStatus,
             data.gateway_response || "Payment failed",
@@ -441,12 +612,13 @@ export const verifyPayment = async (req, res) => {
         // Add failure entry to order history
         await client.query(
           `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
-          [result.rows[0].id, "failed", "Payment verification failed"]
+          [updatedOrder.id, "failed", "Payment verification failed"]
         );
       }
 
       // Commit transaction
       await client.query("COMMIT");
+      console.log("Transaction committed successfully");
 
       res.status(200).json({
         success: true,
@@ -455,6 +627,7 @@ export const verifyPayment = async (req, res) => {
           payment_status: paymentStatus,
           payment_method: paymentMethod,
           verified_at: new Date().toISOString(),
+          verified_by: "user"
         },
       });
     } catch (verificationError) {
@@ -639,8 +812,10 @@ export const getOrderHistory = async (req, res) => {
   }
 }
 
+// cancel order
 export const cancelOrder = async (req, res) => {
-  const client = await db.connect()
+  const client = await db.connect();
+
   try {
     await client.query("BEGIN");
 
@@ -654,7 +829,8 @@ export const cancelOrder = async (req, res) => {
       FROM orders o
       LEFT JOIN users u ON o.user_id = u.id
       WHERE o.id = $1 AND o.user_id = $2
-      `, [orderId, userId]
+      `,
+      [orderId, userId]
     );
 
     if (orderQuery.rows.length === 0) {
@@ -668,70 +844,101 @@ export const cancelOrder = async (req, res) => {
     const order = orderQuery.rows[0];
 
     // Check if order can be cancelled
-    if (!['pending', 'processing'].includes(order.order_status)) {
+    if (!["pending", "processing"].includes(order.order_status)) {
       return res.status(400).json({
         success: false,
-        message: "Order cannot be cancelled. It is already shipped, delivered or cancelled."
+        message:
+          "Order cannot be cancelled. It is already shipped, delivered or cancelled.",
       });
     }
 
     let refundProcessed = false;
     let refundError = null;
+    let refundData = null;
 
     // Handle refund if payment was made
-    if (order.status === 'paid' && order.payment_ref) {
+    if (order.status === "paid" && order.payment_ref) {
       try {
-        const response = await axios.post('https://api.paystack.co/refund', 
+        const response = await axios.post(
+          "https://api.paystack.co/refund",
           {
             transaction: order.payment_ref,
-            amount: order.total * 100 // Convert to kobo
+            amount: order.total * 100, // Convert to kobo
           },
           {
             headers: {
               Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-              'Content-Type': 'application/json'
+              "Content-Type": "application/json",
             },
-            timeout: 30000 // 30 seconds timeout
+            timeout: 30000, // 30 seconds timeout
           }
         );
+        const result = response.data;
 
-        if (response.data.status && response.data.data.status === "pending") {
+        if (
+          result.status &&
+          ["pending", "processed"].includes(result.data.status)
+        ) {
           refundProcessed = true;
-          console.log("Refund initiated:", response.data.data);
+          refundData = result.data;
+          console.log("Refund initiated successfully:", result.data);
         } else {
-          console.log("Refund failed:", response.data);
-          refundError = response.data;
+          console.log("Refund failed:", result);
+          refundError = result;
         }
       } catch (paystackError) {
         console.log("Error processing refund", paystackError);
-        return res.status(500).json({
-          success: false,
-          message: "Failed to process refund",
-          error: paystackError.message
-        });
+
+        if (paystackError.response && paystackError.response.status === 400) {
+          const errorData = paystackError.response.data;
+
+          if (
+            errorData.code === "transaction_reversed" &&
+            errorData.message === "Transaction has been fully reversed"
+          ) {
+            refundProcessed = true;
+            refundData = {
+              status: "already_processed",
+              message: errorData.message,
+            };
+            console.log("Transaction already fully reversed: ", errorData);
+          } else {
+            console.log("Paystack refund error: ", errorData);
+            refundError = errorData;
+          }
+        } else {
+          return res.status(500).json({
+            success: false,
+            message: "Failed to process refund",
+            error: paystackError.message,
+          });
+        }
       }
     }
 
     // Update order status to cancelled
     await client.query(
-      `UPDATE orders SET order_status = $1, updated_at = NOW() WHERE id = $2`, 
-      ['cancelled', orderId]
+      `UPDATE orders SET order_status = $1, updated_at = NOW() WHERE id = $2`,
+      ["cancelled", orderId]
     );
 
     // Log status change in order_status_history
     await client.query(
-      `INSERT INTO order_status_history (order_id, status, notes, created_at) VALUES ($1, $2, $3, NOW())`, 
-      [orderId, 'cancelled', `Order cancelled by user`]
+      `INSERT INTO order_status_history (order_id, status, notes, created_at) VALUES ($1, $2, $3, NOW())`,
+      [orderId, "cancelled", `Order cancelled by user`]
     );
 
     // Restore product stock
     const itemsQuery = await client.query(
-      `SELECT product_id, quantity FROM order_items WHERE order_id = $1`, 
+      `SELECT product_id, quantity FROM order_items WHERE order_id = $1`,
       [orderId]
     );
 
     for (const item of itemsQuery.rows) {
-      const productExists = await client.query('SELECT id FROM products WHERE id = $1', [item.product_id]);
+      const productExists = await client.query(
+        "SELECT id FROM products WHERE id = $1",
+        [item.product_id]
+      );
 
       if (productExists.rows.length > 0) {
         await client.query(
@@ -750,7 +957,16 @@ export const cancelOrder = async (req, res) => {
     // Email notification
     let refundMessage = "";
     if (refundProcessed) {
-      refundMessage = "<p>A refund has been initiated and will be processed within 5-7 working days</p>";
+      if (refundData.status === "processed") {
+        refundMessage =
+          "<p>Your refund has been processed successfully and should reflect in your account within 1-3 working days.</p>";
+      } else if (refundData.status === "pending") {
+        refundMessage =
+          "<p>A refund has been initiated and will be processed within 5-7 working days.</p>";
+      } else {
+        refundMessage =
+          "<p>Your refund is being processed and will be completed within 5-7 working days.</p>";
+      }
     } else if (refundError) {
       refundMessage = `
           <p>We encountered a technical issue while processing your refund automatically. Don't worry - your refund is guaranteed!</p>
@@ -763,7 +979,8 @@ export const cancelOrder = async (req, res) => {
           <p>We apologize for any inconvenience this may cause.</p>
         `;
     } else {
-      refundMessage = "<p>Since no payment was made for this order, no refund is required.</p>";
+      refundMessage =
+        "<p>Since no payment was made for this order, no refund is required.</p>";
     }
 
     const mailOptions = {
@@ -776,14 +993,14 @@ export const cancelOrder = async (req, res) => {
           <p>Dear ${order.name},</p>
           <p>Your order (ID: ${orderId}) has been successfully cancelled. Please find the details below:</p>
           <p><strong>Order ID:</strong> ${order.id}</p>
-          <p><strong>Order Total:</strong> NGN ${(order.total / 100).toFixed(2)}</p> 
+          <p><strong>Order Total:</strong> NGN ${order.total.toLocaleString()}</p> 
           <p><strong>Cancellation Date:</strong> ${new Date().toLocaleDateString()}</p>     
           ${refundMessage}
           <p>Thank you for shopping with us</p><br>
           <p>Best regards</p>
           <p>The E-Commerce API Team</p>
         </div>
-      `
+      `,
     };
 
     // Send email
@@ -792,11 +1009,10 @@ export const cancelOrder = async (req, res) => {
     } catch (emailErr) {
       console.log("Email sending failed:", emailErr);
     }
-    
 
     // Fetch updated order
     const updatedOrderQuery = await client.query(
-      'SELECT * FROM orders WHERE id = $1',
+      "SELECT * FROM orders WHERE id = $1",
       [orderId]
     );
 
@@ -805,19 +1021,26 @@ export const cancelOrder = async (req, res) => {
     res.status(200).json({
       success: true,
       message: "Order cancelled successfully",
-      order: updatedOrder
-    })
+      order: updatedOrder,
+      refund: refundProcessed
+        ? {
+            status: refundData?.status,
+            amount: refundData?.amount / 100,
+            expected_at: refundData?.expected_at,
+          }
+        : null,
+    });
   } catch (err) {
     console.error("Error Cancelling Order", err);
-    
+
     await client.query("ROLLBACK");
 
     res.status(500).json({
       success: false,
       message: "Failed to cancel order",
-      error: err.message
-    })
+      error: err.message,
+    });
   } finally {
-    client.release()
+    client.release();
   }
-}
+};

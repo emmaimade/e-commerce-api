@@ -16,6 +16,6 @@ router.get("/payment/verify/:reference", auth, verifyPayment);
 router.get("/", auth, getOrders);
 router.get("/:id", auth, getOrder);
 router.get("/:orderId/history", auth, getOrderHistory);
-router.delete("/:id", auth, cancelOrder);
+router.delete("/:orderId", auth, cancelOrder);
 
 export default router;
