@@ -359,7 +359,7 @@ const handleSuccessfulPayment = async (data) => {
             <p style="margin-bottom: 10px;">Our customer support team is here to help:</p>
             <ul style="list-style: none; padding-left: 0;">
               <li style="margin: 8px 0;">📧 <strong>Email:</strong> ${process.env.EMAIL_USER}</li>
-              <li style="margin: 8px 0;">📞 <strong>Phone:</strong> +234-XXX-XXXX-XXX</li>
+              <li style="margin: 8px 0;">📞 <strong>Phone:</strong> ${process.env.SUPPORT_PHONE || '+234-XXX-XXXX-XXX'}</li>
               <li style="margin: 8px 0;">💬 <strong>Live Chat:</strong> Available on our website</li>
             </ul>
             <p style="font-size: 14px; color: #666; margin-bottom: 0;">
@@ -633,7 +633,7 @@ const handleSuccessfulRefund = async (data) => {
             <p style="margin-bottom: 10px;">Our customer support team is here to help:</p>
             <ul style="list-style: none; padding-left: 0;">
               <li style="margin: 8px 0;">📧 <strong>Email:</strong> ${process.env.EMAIL_USER}</li>
-              <li style="margin: 8px 0;">📞 <strong>Phone:</strong> +234-XXX-XXXX-XXX</li>
+              <li style="margin: 8px 0;">📞 <strong>Phone:</strong> ${process.env.SUPPORT_PHONE || '+234-XXX-XXXX-XXX'}</li>
               <li style="margin: 8px 0;">💬 <strong>Live Chat:</strong> Available on our website</li>
             </ul>
             <p style="font-size: 14px; color: #666; margin-bottom: 0;">
