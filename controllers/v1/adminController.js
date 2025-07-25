@@ -4,6 +4,7 @@ import db from "../../config/db.js";
 import { updateProductInventory } from "./paymentController.js";
 import { uploadMultipleToCloudinary, deleteFromCloudinary } from "../../utils/cloudinaryUpload.js";
 import { getNextDayString, isValidDateFormat} from "../../utils/dateHelpers.js";
+import createTransporter from "../../utils/email.js";
 
 
 // ========================================
@@ -1023,7 +1024,7 @@ export const verifyPaymentAdmin = async (req, res) => {
                       <li style="margin: 8px 0;">📧 <strong>Email:</strong> ${
                         process.env.EMAIL_USER
                       }</li>
-                      <li style="margin: 8px 0;">📞 <strong>Phone:</strong> +234-XXX-XXXX-XXX</li>
+                      <li style="margin: 8px 0;">📞 <strong>Phone:</strong> ${process.env.SUPPORT_PHONE || '+234-XXX-XXXX-XXX'}</li>
                       <li style="margin: 8px 0;">💬 <strong>Live Chat:</strong> Available on our website</li>
                     </ul>
                     <p style="font-size: 14px; color: #666; margin-bottom: 0;">
@@ -1142,13 +1143,38 @@ export const updateOrderStatus = async (req, res) => {
     }
 
     // Validate status
-    const validStatuses = ["pending", "processing", "shipped", "delivered", "cancelled"];
+    const validStatuses = ["processing", "shipped", "delivered", "cancelled"];
     if (!validStatuses.includes(status)) {
       return res.status(400).json({
         success: false,
         message: `Invalid status. Valid statuses are: ${validStatuses.join(", ")}`,
       });
     }
+
+    // Get current user order with customer details
+    const currentOrderQuery = await client.query(
+      `SELECT 
+        o.*, 
+        u.email, u.name 
+      FROM orders o
+      JOIN users u ON o.user_id = u.id
+      WHERE o.id = $1`,
+      [orderId]
+    );
+
+    if (currentOrderQuery.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        success: false,
+        message: "Order not found"
+      });
+    }
+
+    const currentOrder = currentOrderQuery.rows[0];
+    const previousStatus = currentOrder.order_status;
+
+    // Check if order status has changed
+    const shouldSendEmail = previousStatus !== status;
 
     const query = `
       UPDATE orders
@@ -1159,25 +1185,209 @@ export const updateOrderStatus = async (req, res) => {
 
     const result = await client.query(query, [status, orderId]);
 
-    if (result.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({
-        success: true,
-        message: "Order not found"
-      });
-    }
-
     // Update Order Status History
     await client.query(
       "INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)",
       [orderId, status, notes]
     );
 
+    // Send email notification if status changed
+    if (shouldSendEmail) {
+      try {
+        const transporter = createTransporter();
+
+        const statusMessages = {
+          processing: "Your order is being prepared for shipment.",
+          shipped: "Your order has been shipped and is on its way to you!",
+          delivered: "You order has been successfully delivered. We hope you love it!",
+          cancelled: "Your order has been cancelled. If you have questions, please contact our support team."
+        };
+
+        const statusColors = {
+          processing: "#ffc107",
+          shipped: "#17a2b8", 
+          delivered: "#28a745",
+          cancelled: "#dc3545"
+        };
+
+        const statusEmojis = {
+          processing: "⚙️",
+          shipped: "🚚",
+          delivered: "✅",
+          cancelled: "❌"
+        };
+
+        const mailOptions = {
+          from: `E-commerce API <${process.env.EMAIL_USER}>`,
+          to: currentOrder.email,
+          subject: `Order Update - ${status.charAt(0).toUpperCase() + status.slice(1)}`,
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+              <!-- Header -->
+              <div style="text-align: center; border-bottom: 2px solid ${statusColors[status] || '#007bff'}; padding-bottom: 20px; margin-bottom: 30px;">
+                <h1 style="color: #333; margin: 0;">${statusEmojis[status] || '📦'} Order Status Update</h1>
+                <p style="color: #666; margin: 5px 0;">Your order status has been updated</p>
+              </div>
+
+              <!-- Greeting -->
+              <p style="font-size: 16px;">Hi ${currentOrder.name || "Valued Customer"},</p>
+              <p>We wanted to keep you updated on your order. The status has been updated from <strong>${previousStatus.toUpperCase()}</strong> to <strong>${status.toUpperCase()}</strong>.</p>
+              
+              <!-- Status Banner -->
+              <div style="background-color: ${statusColors[status] || '#007bff'}; color: white; padding: 15px; border-radius: 8px; margin: 20px 0; text-align: center;">
+                <h2 style="margin: 0; text-transform: uppercase;">${statusEmojis[status] || '📦'} ${status}</h2>
+              </div>
+
+              <!-- Order Details Card -->
+              <div style="background-color: #f8f9fa; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 4px solid ${statusColors[status] || '#007bff'};">
+                <h3 style="margin-top: 0; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Order Details</h3>
+                <table style="width: 100%; border-collapse: collapse;">
+                  <tr>
+                    <td style="padding: 10px 0; font-weight: bold; color: #555;">Order ID:</td>
+                    <td style="padding: 10px 0; color: #007bff; font-weight: bold;">#${orderId}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 10px 0; font-weight: bold; color: #555;">Order Total:</td>
+                    <td style="padding: 10px 0; font-size: 16px; font-weight: bold;">₦${currentOrder.total.toLocaleString()}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 10px 0; font-weight: bold; color: #555;">Status:</td>
+                    <td style="padding: 10px 0;">
+                      <span style="background-color: ${statusColors[status] || '#007bff'}; color: white; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">
+                        ${status.toUpperCase()}
+                      </span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 10px 0; font-weight: bold; color: #555;">Updated:</td>
+                    <td style="padding: 10px 0;">${new Date().toLocaleDateString("en-US", {
+                      year: "numeric",
+                      month: "long",
+                      day: "numeric", 
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 10px 0; font-weight: bold; color: #555;">Updated By:</td>
+                    <td style="padding: 10px 0; color: #dc3545; font-weight: bold;">Admin Team</td>
+                  </tr>
+                  ${notes ? `
+                  <tr>
+                    <td style="padding: 10px 0; font-weight: bold; color: #555; vertical-align: top;">Notes:</td>
+                    <td style="padding: 10px 0; background-color: #fff3cd; padding: 8px 12px; border-radius: 4px; border-left: 3px solid #ffc107;">${notes}</td>
+                  </tr>
+                  ` : ''}
+                </table>
+              </div>
+
+              <!-- Status Message -->
+              <div style="background-color: #e8f4f8; padding: 20px; border-radius: 8px; margin: 25px 0;">
+                <p style="margin: 0; font-size: 16px; line-height: 1.6; text-align: center;">
+                  ${statusMessages[status] || 'Your order status has been updated.'}
+                </p>
+              </div>
+
+              ${status === 'shipped' ? ` 
+              <!-- Shipping Info (if shipped) --> 
+              <div style="background-color: #d1ecf1; border: 1px solid #bee5eb; padding: 20px; border-radius: 8px; margin: 25px 0;"> 
+                <h4 style="margin-top: 0; color: #0c5460;">🚚 Shipping Information</h4> 
+                <p style="margin-bottom: 10px;">Your order is on its way! You can track your shipment using the tracking information that will be provided separately.</p> 
+                <p style="margin-bottom: 15px; font-size: 14px; color: #0c5460;"> 
+                  <strong>Estimated delivery:</strong> 3-5 business days 
+                </p>
+                
+                <!-- Order History Button -->
+                <div style="text-align: center; margin-top: 20px;">
+                  <a href="${process.env.BASE_URL}/v1/order/${orderId}/history" 
+                    style="display: inline-block; 
+                            background-color: #17a2b8; 
+                            color: white; 
+                            padding: 10px 20px; 
+                            text-decoration: none; 
+                            border-radius: 5px; 
+                            font-weight: bold; 
+                            transition: background-color 0.3s ease;
+                            border: none;
+                            cursor: pointer;"
+                    onmouseover="this.style.backgroundColor='#138496'" 
+                    onmouseout="this.style.backgroundColor='#17a2b8'">
+                    📋 View Order History
+                  </a>
+                </div>
+              </div> 
+              ` : ''}
+
+              ${status === 'delivered' ? `
+              <!-- Delivery Confirmation -->
+              <div style="background-color: #d4edda; border: 1px solid #c3e6cb; padding: 20px; border-radius: 8px; margin: 25px 0;">
+                <h4 style="margin-top: 0; color: #155724;">🎉 Delivery Confirmed!</h4>
+                <p style="margin-bottom: 15px;">We hope you're happy with your purchase! If you have a moment, we'd love to hear about your experience.</p>
+                <div style="text-align: center;">
+                  <a href="#" style="display: inline-block; background-color: #28a745; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold;">
+                    Leave a Review
+                  </a>
+                </div>
+              </div>
+              ` : ''}
+
+              ${status === 'cancelled' ? `
+              <!-- Cancellation Info -->
+              <div style="background-color: #f8d7da; border: 1px solid #f5c6cb; padding: 20px; border-radius: 8px; margin: 25px 0;">
+                <h4 style="margin-top: 0; color: #721c24;">Order Cancellation</h4>
+                <p style="margin-bottom: 10px;">If a payment was processed, the refund will be credited back to your original payment method within 5-7 business days.</p>
+                <p style="margin-bottom: 0;">If you have any questions about this cancellation, please don't hesitate to contact our support team.</p>
+              </div>
+              ` : ''}
+
+              <!-- Support Section -->
+              <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 25px 0;">
+                <h4 style="margin-top: 0; color: #333;">Need Help? 🤝</h4>
+                <p style="margin-bottom: 10px;">Questions about your order? We're here to help:</p>
+                <ul style="list-style: none; padding-left: 0;">
+                  <li style="margin: 8px 0;">📧 <strong>Email:</strong> ${process.env.EMAIL_USER}</li>
+                  <li style="margin: 8px 0;">📞 <strong>Phone:</strong> ${process.env.SUPPORT_PHONE || '+234-XXX-XXXX-XXX'}</li>
+                  <li style="margin: 8px 0;">💬 <strong>Live Chat:</strong> Available on our website</li>
+                </ul>
+                <p style="font-size: 14px; color: #666; margin-bottom: 0;">
+                  Please reference Order ID <strong>#${orderId}</strong> when contacting support.
+                </p>
+              </div>
+
+              <!-- Footer -->
+              <div style="text-align: center; padding-top: 30px; border-top: 1px solid #ddd; margin-top: 40px;">
+                <p style="font-size: 18px; margin-bottom: 10px;">Thank you for shopping with us! 🛍️</p>
+                <p style="color: #666; margin-bottom: 20px;">
+                  Best regards,<br>
+                  <strong>The E-commerce API Team</strong>
+                </p>
+                
+                <!-- Email Footer -->
+                <div style="font-size: 12px; color: #999; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
+                  <p>This email was sent to <strong>${currentOrder.email}</strong></p>
+                  <p>© 2024 E-commerce API. All rights reserved.</p>
+                </div>
+              </div>
+            </div>
+          `,
+        };
+
+        await transporter.sendMail(mailOptions);
+        console.log(`Order status update email sent for status: ${status}`);
+      } catch (emailError) {
+        console.error("Email sending failed:", emailError.message);
+      }
+    }
+
     await client.query("COMMIT");
     res.status(200).json({
       success: true,
       message: "Order status updated successfully",
-      data: result.rows[0],
+      data: {
+        ...result.rows[0],
+        email_sent: shouldSendEmail,
+        previous_status: previousStatus
+      },
     });
   } catch (err) {
     console.log("Error updating order status", err);
