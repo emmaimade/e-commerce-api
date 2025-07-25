@@ -783,7 +783,7 @@ export const getOrderAdmin = async (req, res) => {
 };
 
 export const verifyPaymentAdmin = async (req, res) => {
-  const client = db.connect();
+  const client = await db.connect();
   try {
     await client.query("BEGIN");
 
@@ -871,7 +871,7 @@ export const verifyPaymentAdmin = async (req, res) => {
       SET
         status = $1, 
         payment_method = $2, 
-        order_status = 'processing'
+        order_status = 'processing',
         updated_at = now()
       WHERE payment_ref = $3 AND status = 'pending'
       RETURNING *
@@ -906,17 +906,158 @@ export const verifyPaymentAdmin = async (req, res) => {
           ]
         );
 
-        // Update order_status in orders
-        await db.query(
-          `UPDATE orders SET order_status = 'processing', updated_at = now() WHERE id = $1`,
-          [result.rows[0].id]
-        );
-
         // Update order status history
         await client.query(
           `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
-          [result.rows[0].id, "processing", "Payment verified, order is being processed"]
+          [result.rows[0].id, "processing", "Payment verified by admin, order is being processed"]
         );
+
+        // Send email to customer
+        try {
+          const customerQuery = await client.query(
+            "SELECT email, first_name FROM users WHERE id = $1",
+            [result.rows[0].user_id]
+          );
+          
+          if (customerQuery.rows.length > 0) {
+            const customer = customerQuery.rows[0];
+            const transporter = createTransporter();
+
+            const mailOptions = {
+              from: `E-commerce API <${process.env.EMAIL_USER}>`,
+              to: customer.email,
+              subject: "Payment Confirmed - Your Order is Being Processed",
+              html: `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                  <!-- Header -->
+                  <div style="text-align: center; border-bottom: 2px solid #28a745; padding-bottom: 20px; margin-bottom: 30px;">
+                    <h1 style="color: #333; margin: 0;">✅ Payment Confirmed!</h1>
+                    <p style="color: #666; margin: 5px 0;">Your order is now being processed</p>
+                  </div>
+
+                  <!-- Greeting -->
+                  <p style="font-size: 16px;">Hi ${
+                    customer.name || "Valued Customer"
+                  },</p>
+                  <p>Great news! Your payment for order <strong>#${
+                    result.rows[0].id
+                  }</strong> has been manually verified by our team. Your order is now being processed and will be prepared for shipment.</p>
+                  
+                  <!-- Success Banner -->
+                  <div style="background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; padding: 15px; border-radius: 8px; margin: 20px 0; text-align: center;">
+                    <strong>🎉 Payment Successfully Verified by Admin</strong>
+                  </div>
+
+                  <!-- Order Details Card -->
+                  <div style="background-color: #f8f9fa; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 4px solid #28a745;">
+                    <h3 style="margin-top: 0; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Payment & Order Details</h3>
+                    <table style="width: 100%; border-collapse: collapse;">
+                      <tr>
+                        <td style="padding: 10px 0; font-weight: bold; color: #555;">Order ID:</td>
+                        <td style="padding: 10px 0; color: #007bff; font-weight: bold;">#${
+                          result.rows[0].id
+                        }</td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 10px 0; font-weight: bold; color: #555;">Order Status:</td>
+                        <td style="padding: 10px 0;">
+                          <span style="background-color: #ffc107; color: #000; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">
+                            PROCESSING
+                          </span>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 10px 0; font-weight: bold; color: #555;">Payment Reference:</td>
+                        <td style="padding: 10px 0; font-family: monospace; background-color: #e9ecef; padding: 5px 8px; border-radius: 4px;">${reference}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 10px 0; font-weight: bold; color: #555;">Payment Method:</td>
+                        <td style="padding: 10px 0; text-transform: capitalize;">${paymentMethod}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 10px 0; font-weight: bold; color: #555;">Amount Paid:</td>
+                        <td style="padding: 10px 0; font-size: 18px; color: #28a745; font-weight: bold;">
+                          ₦${result.rows[0].total.toLocaleString()}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 10px 0; font-weight: bold; color: #555;">Verified By:</td>
+                        <td style="padding: 10px 0; color: #dc3545; font-weight: bold;">Admin Team</td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 10px 0; font-weight: bold; color: #555;">Verification Date:</td>
+                        <td style="padding: 10px 0;">${new Date().toLocaleDateString(
+                          "en-US",
+                          {
+                            year: "numeric",
+                            month: "long",
+                            day: "numeric",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          }
+                        )}</td>
+                      </tr>
+                    </table>
+                  </div>
+
+                  <!-- Next Steps -->
+                  <div style="background-color: #e8f4f8; padding: 20px; border-radius: 8px; margin: 25px 0;">
+                    <h3 style="margin-top: 0; color: #2c5aa0;">📦 What Happens Next?</h3>
+                    <ol style="padding-left: 20px; line-height: 1.6;">
+                      <li><strong>Order Processing</strong> - We're preparing your items for shipment</li>
+                      <li><strong>Quality Check</strong> - Each item is carefully inspected</li>
+                      <li><strong>Packaging</strong> - Your order will be securely packaged</li>
+                      <li><strong>Shipping</strong> - You'll receive tracking information via email</li>
+                      <li><strong>Delivery</strong> - Your order will arrive at your specified address</li>
+                    </ol>
+                    <p style="margin-bottom: 0; font-size: 14px; color: #666;">
+                      <strong>Estimated processing time:</strong> 1-2 business days
+                    </p>
+                  </div>
+
+                  <!-- Support Section -->
+                  <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 25px 0;">
+                    <h4 style="margin-top: 0; color: #333;">Need Help? 🤝</h4>
+                    <p style="margin-bottom: 10px;">Our customer support team is here to help:</p>
+                    <ul style="list-style: none; padding-left: 0;">
+                      <li style="margin: 8px 0;">📧 <strong>Email:</strong> ${
+                        process.env.EMAIL_USER
+                      }</li>
+                      <li style="margin: 8px 0;">📞 <strong>Phone:</strong> +234-XXX-XXXX-XXX</li>
+                      <li style="margin: 8px 0;">💬 <strong>Live Chat:</strong> Available on our website</li>
+                    </ul>
+                    <p style="font-size: 14px; color: #666; margin-bottom: 0;">
+                      Please reference Order ID <strong>#${
+                        result.rows[0].id
+                      }</strong> when contacting support.
+                    </p>
+                  </div>
+
+                  <!-- Footer -->
+                  <div style="text-align: center; padding-top: 30px; border-top: 1px solid #ddd; margin-top: 40px;">
+                    <p style="font-size: 18px; margin-bottom: 10px;">Thank you for shopping with us! 🛍️</p>
+                    <p style="color: #666; margin-bottom: 20px;">
+                      Best regards,<br>
+                      <strong>The E-commerce API Team</strong>
+                    </p>
+                    
+                    <!-- Email Footer -->
+                    <div style="font-size: 12px; color: #999; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
+                      <p>This email was sent to <strong>${customer.email}</strong></p>
+                      <p>© 2024 E-commerce API. All rights reserved.</p>
+                      <p>If you have any concerns about this transaction, please contact us immediately.</p>
+                    </div>
+                  </div>
+                </div>
+              `,
+            };
+
+            await transporter.sendMail(mailOptions);
+            console.log("Payment Confirmation Email sent successfully");
+          }
+        } catch (emailError) {
+          console.error("Email sending failed:", emailError.message);
+        }
       } else {
         // Log the failed payment
         await client.query(
