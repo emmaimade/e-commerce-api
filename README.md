@@ -179,6 +179,8 @@ Once the server is running, you can access the Swagger documentation at:
 |--------|----------|-------------|
 | GET | `/api/v1/payments/status/:reference` | Get Payment Status |
 | GET | `/api/v1/admin/payments/status/:reference` | Get Payment Status (Admin) |
+| GET | `/api/v1/admin/payments/logs` | Get Payment Logs (Admin) |
+| GET | `/api/v1/admin/payments/analytics` | Get Payment Analytics (Admin) |
 | POST | `/api/v1/payments/webhook` | Payment webhook |
 
 ### Shipping Address Endpoints
