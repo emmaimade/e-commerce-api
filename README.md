@@ -118,10 +118,9 @@ The API will be available at `http://localhost:3000` (or the port specified in .
 - **yamljs**: YAML parser for Swagger documentation
 
 ## API Documentation
-Once the server is running, you can access the Swagger documentation at:
-`http://localhost:3000/api-docs`
-
-## API Documentation
+Once the server is running locally, you can access the interactive Swagger documentation at http://localhost:3000/docs (or the port specified in your .env file). The API specification is defined in swagger.yaml.
+The Swagger UI allows you to explore and test the API endpoints interactively, including authentication flows and example requests.
+For production deployments, update the base URL in the Swagger configuration to match your production environment.
 
 ### Authentication Endpoints
 
