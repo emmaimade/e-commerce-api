@@ -28,7 +28,7 @@ export const updateUser = async (req, res) => {
     const updates = req.body;
 
     // define allowed fields
-    const allowedFields = ["name", "email", "password"];
+    const allowedFields = ["name", "email"];
     const allowedUpdates = {};
 
     // filter only allowed fields
@@ -45,6 +45,13 @@ export const updateUser = async (req, res) => {
       });
     }
 
+    if (allowedUpdates.name && allowedUpdates.name.length < 3) {
+      return res.status(400).json({
+        success: false,
+        message: "Name must be at least 3 characters long",
+      });
+    }
+
     // checks if email already exists
     const emailCheck = await db.query(
       "SELECT id FROM users WHERE email = $1 AND id != $2",
@@ -56,18 +63,6 @@ export const updateUser = async (req, res) => {
         success: false,
         message: "Email already exists",
       });
-    }
-
-    // validate and hash password if provided
-    if (allowedUpdates.password) {
-      if (allowedUpdates.password < 6) {
-        return res.status(400).json({
-          success: false,
-          message: "Password must be at least 6 characters long",
-        });
-      }
-
-      allowedUpdates.password = await bcrypt.hash(allowedUpdates.password, 10);
     }
 
     // dynamic sql query

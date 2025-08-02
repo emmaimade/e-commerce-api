@@ -1,4 +1,4 @@
-# E-Commerce API
+# 🛒 E-Commerce API
 
 A comprehensive RESTful API for managing an e-commerce platform, built using Node.js, Express.js, and PostgreSQL. The API includes secure user authentication, product management with image uploads via Cloudinary, and order processing with payment integration. The database schema is managed using pgAdmin, and API documentation is served via Swagger UI.
 
