@@ -12,6 +12,7 @@ const db = new Pool({
     // password: process.env.PG_PASSWORD,
     // port: process.env.PG_PORT,
     connectionString: process.env.DATABASE_URL,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
 export default db;
