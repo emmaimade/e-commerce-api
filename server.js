@@ -34,7 +34,7 @@ app.use(express.json());
 const swaggerDocument = YAML.load(path.join(__dirname, "swagger.yaml"));
 
 app.use(
-  "/docs",
+  '/v1/docs',
   swaggerUI.serve,
   swaggerUI.setup(swaggerDocument, {
     customCss: `
@@ -109,6 +109,6 @@ app.use((req, res) => {
 
 app.listen(port, () => {
     console.log(`Server is running on http://localhost:${port}`);
-    console.log(`API Documentation: http://localhost:${port}/docs`);
+    console.log(`API Documentation: http://localhost:${port}/v1/docs`);
     console.log(`Health Check: http://localhost:${port}/health`);
 })
