@@ -2,6 +2,12 @@
 
 A comprehensive RESTful API for managing an e-commerce platform, built using Node.js, Express.js, and PostgreSQL. The API includes secure user authentication, product management with image uploads via Cloudinary, and order processing with payment integration. The database schema is managed using pgAdmin, and API documentation is served via Swagger UI.
 
+## 🚀 Live Demo
+
+- **API Base URL**: https://ecommerce-api-jq0h.onrender.com
+- **Interactive Documentation**: https://ecommerce-api-jq0h.onrender.com/v1/docs
+- **Status**: [![Render Status](https://img.shields.io/website?url=https://ecommerce-api-jq0h.onrender.com)](https://ecommerce-api-jq0h.onrender.com)
+
 ## Features
 
 ### 🛍️ Core E-Commerce Functionality
@@ -118,9 +124,14 @@ The API will be available at `http://localhost:3000` (or the port specified in .
 - **yamljs**: YAML parser for Swagger documentation
 
 ## API Documentation
-Once the server is running locally, you can access the interactive Swagger documentation at http://localhost:3000/docs (or the port specified in your .env file). The API specification is defined in swagger.yaml.
+
+### Live Documentation
+🌐 **Interactive API Documentation**: [https://ecommerce-api-jq0h.onrender.com/v1/docs](https://ecommerce-api-jq0h.onrender.com/v1/docs)
+
+### Local Development
+Once the server is running locally, you can access the interactive Swagger documentation at http://localhost:3000/v1/docs (or the port specified in your .env file).
+
 The Swagger UI allows you to explore and test the API endpoints interactively, including authentication flows and example requests.
-For production deployments, update the base URL in the Swagger configuration to match your production environment.
 
 ### Authentication Endpoints
 
