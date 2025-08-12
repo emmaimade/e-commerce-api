@@ -10,4 +10,13 @@ const db = new Pool({
     ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
+// Test the database connection
+db.on('connect', () => {
+    console.log('Connected to PostgreSQL database');
+});
+
+db.on('error', (err) => {
+    console.error('Database connection error:', err);
+});
+
 export default db;
