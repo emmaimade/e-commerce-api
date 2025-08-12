@@ -69,11 +69,7 @@ A comprehensive RESTful API for managing an e-commerce platform, built using Nod
    Create a `.env` file in the root directory:
    ```env
    PORT=3000
-   PG_USER="postgres"
-   PG_HOST="localhost"
-   PG_DATABASE="ecommerce"
-   PG_PASSWORD="your-password"
-   PG_PORT=5432
+   DATABASE_URL=postgresql://postgres:your-password@localhost:5432/ecommerce
    JWT_SECRET=your-secret-key-here
    EMAIL_USER=your-email@gmail.com
    EMAIL_PASS=your-app-password
@@ -81,6 +77,7 @@ A comprehensive RESTful API for managing an e-commerce platform, built using Nod
    CLOUDINARY_API_KEY=your-cloudinary-key
    CLOUDINARY_API_SECRET=your-cloudinary-secret
    PAYSTACK_SECRET_KEY=your-paystack-secret-key
+   WEBHOOK_URL=http://localhost:3000/v1/payments/webhook
    ```
 
 4. **Database Setup**
