@@ -130,7 +130,7 @@ export const forgotPassword = async (req, res) => {
 
     // Generate reset token
     const resetToken = crypto.randomBytes(32).toString("hex");
-    const resetTokenExpiry = new Date(Date.now() + 900); // 15 minutes from now
+    const resetTokenExpiry = new Date(Date.now() + (15 * 60 * 1000)); // 15 minutes in milliseconds
 
     // Save token and expiry to database
     await db.query(
@@ -161,7 +161,7 @@ export const forgotPassword = async (req, res) => {
           </a>
           <p>Or copy and paste this link into your browser:</p>
           <p>${resetUrl}</p>
-          <p>This link will expire in 1 hour.</p>
+          <p>This link will expire in 15 minutes.</p>
           <p>If you didn't request this, please ignore this email.</p>
         </div>
       `
