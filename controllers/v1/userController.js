@@ -5,8 +5,11 @@ export const getUser = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const user = await db.query("SELECT * FROM users WHERE id = $1", [userId]);
-    if (!user) {
+    const user = await db.query(
+      "SELECT id, name, email, role, created_at, updated_at FROM users WHERE id = $1",
+      [userId]
+    );
+    if (user.rows.length === 0) {
       return res.status(404).json({
         success: false,
         message: "User not found",
@@ -74,7 +77,7 @@ export const updateUser = async (req, res) => {
 
     const query = `UPDATE users SET ${setClause}, updated_at = NOW() WHERE id = $${
       fields.length + 1
-    } RETURNING *`;
+    } RETURNING id, name, email, role, created_at, updated_at`;
 
     // update user
     const result = await db.query(query, [...values, userId]);

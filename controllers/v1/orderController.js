@@ -15,6 +15,7 @@ export const createOrder = async (req, res) => {
     const { shipping_address_id } = req.body;
 
     if (!shipping_address_id) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
         message: "Shipping Address is required!",
@@ -123,6 +124,18 @@ export const createOrder = async (req, res) => {
     // Generate unique payment reference
     const paymentReference = `order-${order.id}-${Date.now()}`;
 
+    await client.query("UPDATE orders SET payment_ref = $1 WHERE id = $2", [
+      paymentReference,
+      order.id,
+    ]);
+
+    // Commit before calling Paystack so the transaction isn't held open during the HTTP request
+    await client.query("COMMIT");
+
+    // Remove the order (items and history cascade) if payment can't be initialized
+    const discardOrder = () =>
+      db.query("DELETE FROM orders WHERE id = $1", [order.id]);
+
     // Initialize paystack payment
     const paymentData = {
       email: req.user.email,
@@ -173,22 +186,13 @@ export const createOrder = async (req, res) => {
       console.log("Paystack initialization response:", paymentResponse.data);
 
       if (!paymentResponse.data.status) {
-        await client.query("ROLLBACK");
+        await discardOrder();
         return res.status(500).json({
           success: false,
           message: "Failed to initialize payment",
           error: paymentResponse.data.message || "Unknown payment error",
         });
       }
-
-      // update order with payment_reference
-      await client.query("UPDATE orders SET payment_ref = $1 WHERE id = $2", [
-        paymentReference,
-        order.id,
-      ]);
-
-      // Commit transaction
-      await client.query("COMMIT");
 
       // Add this after committing the transaction in createOrder
       const transporter = createTransporter();
@@ -379,8 +383,8 @@ export const createOrder = async (req, res) => {
       });
     } catch (paymentError) {
       console.error("Paystack payment initialization error:", paymentError);
-      // Rollback transaction on payment error
-      await client.query("ROLLBACK");
+      // Order is already committed, so remove it on payment error
+      await discardOrder();
 
       return res.status(500).json({
         success: false,
@@ -418,6 +422,7 @@ export const verifyPayment = async (req, res) => {
     const userId = req.user.id;
 
     if (!reference || typeof reference !== "string") {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
         message: "Invalid payment reference",
@@ -491,9 +496,9 @@ export const verifyPayment = async (req, res) => {
       SET
         status = $1, 
         payment_method = $2,
-        order_status = CASE WHEN $1 = 'paid' THEN 'processing' ELSE order_status END, 
+        order_status = CASE WHEN $1 = 'paid' THEN 'processing' ELSE order_status END,
         updated_at = now()
-      WHERE payment_ref = $3
+      WHERE payment_ref = $3 AND status = 'pending'
       RETURNING *
     `;
 
@@ -503,16 +508,21 @@ export const verifyPayment = async (req, res) => {
         reference,
       ]);
 
+      // Webhook processed this payment while we were verifying
+      if (result.rows.length === 0) {
+        await client.query("ROLLBACK");
+        return res.status(200).json({
+          success: true,
+          message: "Payment has already been verified",
+        });
+      }
+
       const updatedOrder = result.rows[0];
 
       if (paymentStatus === "paid") {
-        // Update Product Inventory
-        try {
-          await updateProductInventory(updatedOrder.id);
-          console.log("Inventory updated successfully");
-        } catch (inventoryError) {
-          console.log("Inventory update failed:", inventoryError.message);
-        }
+        // Update Product Inventory in the same transaction as the order update
+        await updateProductInventory(updatedOrder.id, client);
+        console.log("Inventory updated successfully");
 
         // Delete cart items
         await client.query(
@@ -965,6 +975,7 @@ export const cancelOrder = async (req, res) => {
 
     // Check if order can be cancelled
     if (!["pending", "processing"].includes(order.order_status)) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
         message:
@@ -1027,6 +1038,7 @@ export const cancelOrder = async (req, res) => {
             refundError = errorData;
           }
         } else {
+          await client.query("ROLLBACK");
           return res.status(500).json({
             success: false,
             message: "Failed to process refund",
@@ -1044,15 +1056,18 @@ export const cancelOrder = async (req, res) => {
 
     // Log status change in order_status_history
     await client.query(
-      `INSERT INTO order_status_history (order_id, status, notes, created_at) VALUES ($1, $2, $3, NOW())`,
+      `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
       [orderId, "cancelled", `Order cancelled by user`]
     );
 
-    // Restore product stock
-    const itemsQuery = await client.query(
-      `SELECT product_id, quantity FROM order_items WHERE order_id = $1`,
-      [orderId]
-    );
+    // Restore product stock - only paid orders had stock deducted
+    const itemsQuery =
+      order.status === "paid"
+        ? await client.query(
+            `SELECT product_id, quantity FROM order_items WHERE order_id = $1`,
+            [orderId]
+          )
+        : { rows: [] };
 
     for (const item of itemsQuery.rows) {
       const productExists = await client.query(

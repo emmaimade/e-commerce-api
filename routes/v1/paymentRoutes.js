@@ -5,7 +5,7 @@ import {
   testWebhook,
 } from "../../controllers/v1/paymentController.js";
 
-import { auth } from "../../middleware/auth.js";
+import { auth, adminAuth } from "../../middleware/auth.js";
 
 const router = express.Router();
 
@@ -16,6 +16,6 @@ router.post("/webhook", handleWebhook);
 router.get("/status/:reference", auth, getPaymentStatus);
 
 // Test webhook - only available in development
-router.post("/test-webhook", testWebhook);
+router.post("/test-webhook", adminAuth, testWebhook);
 
 export default router;

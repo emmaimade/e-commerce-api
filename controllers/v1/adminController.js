@@ -872,7 +872,7 @@ export const verifyPaymentAdmin = async (req, res) => {
       SET
         status = $1, 
         payment_method = $2, 
-        order_status = 'processing',
+        order_status = CASE WHEN $1 = 'paid' THEN 'processing' ELSE order_status END,
         updated_at = now()
       WHERE payment_ref = $3 AND status = 'pending'
       RETURNING *
@@ -884,14 +884,19 @@ export const verifyPaymentAdmin = async (req, res) => {
         reference,
       ]);
 
+      // Order was no longer pending (e.g. webhook processed it concurrently)
+      if (result.rows.length === 0) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({
+          success: false,
+          message: "Payment already processed",
+        });
+      }
+
       if (paymentStatus === "paid") {
-        // Update product inventory
-        try {
-          await updateProductInventory(result.rows[0].id);
-          console.log("Inventory updated successfully");
-        } catch (inventoryError) {
-          console.log("Inventory update failed:", inventoryError.message);
-        }
+        // Update product inventory in the same transaction as the order update
+        await updateProductInventory(result.rows[0].id, client);
+        console.log("Inventory updated successfully");
 
         // Log the payment transaction for audit trail
         await client.query(

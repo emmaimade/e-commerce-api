@@ -29,8 +29,8 @@ router.get("/users/:id", adminAuth, adminGetUser);
 // PRODUCTS
 router.get("/products/", adminAuth, getProducts);
 router.get("/products/:id", adminAuth, getProduct);
-router.post("/products/", upload.array("images", 5), adminAuth, addProduct);
-router.patch("/products/:id", upload.array("images", 5), adminAuth, updateProduct);
+router.post("/products/", adminAuth, upload.array("images", 5), addProduct);
+router.patch("/products/:id", adminAuth, upload.array("images", 5), updateProduct);
 router.patch("/products/:id/images", adminAuth, deleteProductImage);
 router.delete("/products/:id", adminAuth, deleteProduct);
 

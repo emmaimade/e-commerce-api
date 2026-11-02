@@ -761,16 +761,18 @@ const handlePendingRefund = async (data) => {
   }
 }
 
-// Update product inventory
-export const updateProductInventory = async (orderId) => {
-  const client = await db.connect();
+// Update product inventory. Pass `externalClient` to run inside the caller's
+// transaction (errors are rethrown); otherwise it runs in its own transaction.
+export const updateProductInventory = async (orderId, externalClient = null) => {
+  const client = externalClient || (await db.connect());
 
   try {
-    await client.query("BEGIN");
+    if (!externalClient) await client.query("BEGIN");
 
     console.log(`Updating inventory for ORDER ID: ${orderId}`);
 
-    // Get order items
+    // Get order items, locking product rows so concurrent payments can't
+    // overwrite each other's stock updates (ordered to avoid deadlocks)
     const orderItemsQuery = `
             SELECT
                 oi.product_id,
@@ -780,18 +782,29 @@ export const updateProductInventory = async (orderId) => {
             FROM order_items oi
             JOIN products p ON oi.product_id = p.id
             WHERE oi.order_id = $1
+            ORDER BY oi.product_id
+            FOR UPDATE OF p
         `;
 
     const orderItemsResult = await client.query(orderItemsQuery, [orderId]);
 
     if (orderItemsResult.rows.length === 0) {
       console.log(`No order items found for ORDER ID: ${orderId}`);
+      if (!externalClient) await client.query("COMMIT");
       return;
     }
 
     for (const item of orderItemsResult.rows) {
       const { product_id, ordered_quantity, product_name, current_stock } =
         item;
+
+      if (ordered_quantity > current_stock) {
+        // Paid order exceeds available stock - needs manual follow-up (refund/backorder)
+        console.error(
+          `OVERSOLD: order ${orderId} needs ${ordered_quantity} x ${product_name} (${product_id}) but only ${current_stock} in stock`
+        );
+      }
+
       const newStockQuantity = Math.max(0, current_stock - ordered_quantity);
 
       await client.query(
@@ -814,18 +827,21 @@ export const updateProductInventory = async (orderId) => {
         console.log(`Product ${product_name} is now out of stock`);
       }
     }
-    await client.query("COMMIT");
+    if (!externalClient) await client.query("COMMIT");
 
     console.log(`Updated inventory successfully for order ${orderId}`);
   } catch (err) {
-    await client.query("ROLLBACK");
     console.error("Error updating product inventory:", {
       error: err.message,
       stack: err.stack,
       orderId: orderId,
     });
+
+    // Caller owns the transaction, let it roll back
+    if (externalClient) throw err;
+    await client.query("ROLLBACK");
   } finally {
-    client.release();
+    if (!externalClient) client.release();
   }
 };
 
@@ -918,10 +934,11 @@ export const getPaymentStatus = async (req, res) => {
 
 // Test webhook endpoint for development
 export const testWebhook = async (req, res) => {
-  if (process.env.NODE_ENV === "production") {
+  // Opt-in: only enabled when NODE_ENV is explicitly set to a non-production value
+  if (!["development", "test"].includes(process.env.NODE_ENV)) {
     return res.status(403).json({
       success: false,
-      message: "Test webhook no available in production",
+      message: "Test webhook is only available in development",
     });
   }
 
