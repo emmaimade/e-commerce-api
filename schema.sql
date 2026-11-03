@@ -71,6 +71,7 @@ CREATE TABLE orders (
 	shipping_address_id UUID REFERENCES addresses(id),
 	payment_method TEXT,
     order_status TEXT NOT NULL DEFAULT 'pending',
+	inventory_reserved BOOLEAN NOT NULL DEFAULT false, -- true while this order's stock is deducted from inventory
 	placed_at TIMESTAMPTZ DEFAULT now(),
 	updated_at TIMESTAMPTZ DEFAULT now()
 );

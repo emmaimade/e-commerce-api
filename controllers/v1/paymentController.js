@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import db from "../../config/db.js";
 import createTransporter from "../../utils/email.js";
+import { updateProductInventory } from "../../utils/inventory.js";
 
 // For successful refunds, you might want a minimal gateway response
 const createMinimalGatewayResponse = (data) => {
@@ -149,6 +150,12 @@ export const handleWebhook = async (req, res) => {
         event: event,
         reference: reference,
       });
+
+      // Non-2xx makes Paystack retry the event; handlers are idempotent
+      return res.status(500).json({
+        success: false,
+        message: "Webhook processing failed",
+      });
     }
   } catch (err) {
     console.error("❌ Error processing webhook:", err);
@@ -160,29 +167,36 @@ export const handleWebhook = async (req, res) => {
 };
 
 // Successful payment handler
+// Errors are rethrown so the webhook responds 500 and Paystack retries
 const handleSuccessfulPayment = async (data) => {
-  try {
-    const { reference, channel, amount, customer } = data;
+  const { reference, channel, amount, customer } = data;
 
-    console.log("Processing successful payment:", {
-      reference,
-      channel,
-      amount: amount / 100, // Convert from kobo to naira
-      customer_email: customer?.email,
-    });
+  console.log("Processing successful payment:", {
+    reference,
+    channel,
+    amount: amount / 100, // Convert from kobo to naira
+    customer_email: customer?.email,
+  });
+
+  const client = await db.connect();
+  let order;
+
+  try {
+    await client.query("BEGIN");
 
     // Check if payment exist
-    const existingPayment = await db.query(
+    const existingPayment = await client.query(
       "SELECT id FROM payment_logs WHERE payment_reference = $1",
       [reference]
     );
 
     if (existingPayment.rows.length > 0) {
+      await client.query("ROLLBACK");
       console.log("Payment already processed");
       return;
     }
 
-    // Update order status only if it's still pending
+    // Update order status only if it's still pending and not cancelled/expired
     const updateQuery = `
       UPDATE orders
       SET
@@ -190,236 +204,240 @@ const handleSuccessfulPayment = async (data) => {
         payment_method = $1,
         order_status = 'processing',
         updated_at = now()
-      WHERE payment_ref = $2 AND status = 'pending'
+      WHERE payment_ref = $2 AND status = 'pending' AND order_status <> 'cancelled'
       RETURNING *
     `;
 
-    const result = await db.query(updateQuery, [channel, reference]);
+    const result = await client.query(updateQuery, [channel, reference]);
 
-    if (result.rows.length > 0) {
-      const order = result.rows[0];
-
-      console.log("Order updated:", {
-        order_id: order.id,
-        user_id: order.user_id,
-        previous_status: "pending",
-        new_status: order.status,
-      });
-
-      // Update Product Inventory
-      try {
-        await updateProductInventory(order.id);
-        console.log("Inventory updated successfully");
-      } catch (inventoryError) {
-        console.log("Inventory update failed:", inventoryError.message);
-      }
-
-      // Only clear cart if order was actually updated (was pending)
-      // This prevents clearing cart if user already verified payment
-      const cartClearResult = await db.query(
-        `DELETE FROM cart_items WHERE cart_id IN (SELECT id FROM carts WHERE user_id = $1) AND EXISTS (SELECT 1 FROM cart_items WHERE cart_id IN (SELECT id FROM carts WHERE user_id = $1))`,
-        [order.user_id]
-      );
-
-      if (cartClearResult.rowCount > 0) {
-        console.log(
-          `Cleared ${cartClearResult.rowCount} items from cart for user ${order.user_id}`
-        );
-      } else {
-        console.log("Cart was alredy empty or cleared");
-      }
-
-      // Log the payment transaction for audit trail
-      await db.query(
-        `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
-        ON CONFLICT (payment_reference) DO NOTHING`,
-        [
-          order.id,
-          reference,
-          "paid",
-          amount / 100, // Convert from kobo to naira
-          channel,
-          "webhook",
-          JSON.stringify(data.gateway_response) || "Payment successful",
-        ]
-      );
-
-      // Update order status history
-      await db.query(
-        `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
-        [order.id, "processing", "Payment verified, order is being processed"]
-      );
-
-      // Create transporter
-      const transporter = createTransporter();
-
-      // Email options
-      const mailOptions = {
-        from: `E-commerce API <${process.env.EMAIL_USER}>`,
-        to: customer.email,
-        subject: "Payment Confirmed - Your Order is Being Processed",
-        html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-          <!-- Header -->
-          <div style="text-align: center; border-bottom: 2px solid #28a745; padding-bottom: 20px; margin-bottom: 30px;">
-            <h1 style="color: #333; margin: 0;">✅ Payment Confirmed!</h1>
-            <p style="color: #666; margin: 5px 0;">Your order is now being processed</p>
-          </div>
-
-          <!-- Greeting -->
-          <p style="font-size: 16px;">Hi ${customer.name || "Valued Customer"},</p>
-          <p>Great news! Your payment for order <strong>#${
-            order.id
-          }</strong> has been successfully confirmed. Your order is now being processed and will be prepared for shipment.</p>
-          
-          <!-- Success Banner -->
-          <div style="background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; padding: 15px; border-radius: 8px; margin: 20px 0; text-align: center;">
-            <strong>🎉 Payment Successfully Processed</strong>
-          </div>
-
-          <!-- Order Details Card -->
-          <div style="background-color: #f8f9fa; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 4px solid #28a745;">
-            <h3 style="margin-top: 0; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Payment & Order Details</h3>
-            <table style="width: 100%; border-collapse: collapse;">
-              <tr>
-                <td style="padding: 10px 0; font-weight: bold; color: #555;">Order ID:</td>
-                <td style="padding: 10px 0; color: #007bff; font-weight: bold;">#${
-                  order.id
-                }</td>
-              </tr>
-              <tr>
-                <td style="padding: 10px 0; font-weight: bold; color: #555;">Order Status:</td>
-                <td style="padding: 10px 0;">
-                  <span style="background-color: #ffc107; color: #000; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">
-                    ${order.order_status.toUpperCase()}
-                  </span>
-                </td>
-              </tr>
-              <tr>
-                <td style="padding: 10px 0; font-weight: bold; color: #555;">Payment Reference:</td>
-                <td style="padding: 10px 0; font-family: monospace; background-color: #e9ecef; padding: 5px 8px; border-radius: 4px;">${
-                  order.payment_ref
-                }</td>
-              </tr>
-              <tr>
-                <td style="padding: 10px 0; font-weight: bold; color: #555;">Payment Method:</td>
-                <td style="padding: 10px 0; text-transform: capitalize;">${
-                  order.payment_method
-                }</td>
-              </tr>
-              <tr>
-                <td style="padding: 10px 0; font-weight: bold; color: #555;">Amount Paid:</td>
-                <td style="padding: 10px 0; font-size: 18px; color: #28a745; font-weight: bold;">
-                  ₦${(amount / 100).toLocaleString()}
-                </td>
-              </tr>
-              <tr>
-                <td style="padding: 10px 0; font-weight: bold; color: #555;">Payment Date:</td>
-                <td style="padding: 10px 0;">${new Date().toLocaleDateString(
-                  "en-US",
-                  {
-                    year: "numeric",
-                    month: "long",
-                    day: "numeric",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  }
-                )}</td>
-              </tr>
-            </table>
-          </div>
-
-          <!-- Next Steps -->
-          <div style="background-color: #e8f4f8; padding: 20px; border-radius: 8px; margin: 25px 0;">
-            <h3 style="margin-top: 0; color: #2c5aa0;">📦 What Happens Next?</h3>
-            <ol style="padding-left: 20px; line-height: 1.6;">
-              <li><strong>Order Processing</strong> - We're preparing your items for shipment</li>
-              <li><strong>Quality Check</strong> - Each item is carefully inspected</li>
-              <li><strong>Packaging</strong> - Your order will be securely packaged</li>
-              <li><strong>Shipping</strong> - You'll receive tracking information via email</li>
-              <li><strong>Delivery</strong> - Your order will arrive at your specified address</li>
-            </ol>
-            <p style="margin-bottom: 0; font-size: 14px; color: #666;">
-              <strong>Estimated processing time:</strong> 1-2 business days
-            </p>
-          </div>
-
-          <!-- Track Order Section -->
-          <div style="text-align: center; margin: 30px 0;">
-            <p>Want to track your order?</p>
-            <a href="${process.env.BASE_URL}/v1/order/${order.id}/history" 
-              style="display: inline-block; background-color: #007bff; color: white; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: bold;">
-              Track Your Order
-            </a>
-          </div>
-
-          <!-- Support Section -->
-          <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 25px 0;">
-            <h4 style="margin-top: 0; color: #333;">Need Help? 🤝</h4>
-            <p style="margin-bottom: 10px;">Our customer support team is here to help:</p>
-            <ul style="list-style: none; padding-left: 0;">
-              <li style="margin: 8px 0;">📧 <strong>Email:</strong> ${process.env.EMAIL_USER}</li>
-              <li style="margin: 8px 0;">📞 <strong>Phone:</strong> ${process.env.SUPPORT_PHONE || '+234-XXX-XXXX-XXX'}</li>
-              <li style="margin: 8px 0;">💬 <strong>Live Chat:</strong> Available on our website</li>
-            </ul>
-            <p style="font-size: 14px; color: #666; margin-bottom: 0;">
-              Please reference Order ID <strong>#${
-                order.id
-              }</strong> when contacting support.
-            </p>
-          </div>
-
-          <!-- Social Media & Reviews -->
-          <div style="text-align: center; margin: 30px 0; padding: 20px; background-color: #fff3cd; border-radius: 8px;">
-            <h4 style="margin-top: 0;">Love your purchase? 💝</h4>
-            <p style="margin-bottom: 15px;">Share your experience and help others discover great products!</p>
-            <div style="margin: 15px 0;">
-              <a href="#" style="text-decoration: none; margin: 0 10px; font-size: 24px;">📘</a>
-              <a href="#" style="text-decoration: none; margin: 0 10px; font-size: 24px;">📷</a>
-              <a href="#" style="text-decoration: none; margin: 0 10px; font-size: 24px;">🐦</a>
-            </div>
-          </div>
-
-          <!-- Footer -->
-          <div style="text-align: center; padding-top: 30px; border-top: 1px solid #ddd; margin-top: 40px;">
-            <p style="font-size: 18px; margin-bottom: 10px;">Thank you for shopping with us! 🛍️</p>
-            <p style="color: #666; margin-bottom: 20px;">
-              Best regards,<br>
-              <strong>The E-commerce API Team</strong>
-            </p>
-            
-            <!-- Email Footer -->
-            <div style="font-size: 12px; color: #999; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
-              <p>This email was sent to <strong>${customer.email}</strong></p>
-              <p>© 2024 E-commerce API. All rights reserved.</p>
-              <p>If you have any concerns about this transaction, please contact us immediately.</p>
-            </div>
-          </div>
-        </div>
-      `,
-      };
-
-      // Send email
-      try {
-        await transporter.sendMail(mailOptions);
-        console.log("Payment Confirmation Email sent successfully");
-      } catch (emailError) {
-        console.log("Email sending failed:", emailError.message);
-      }
-    } else {
-      console.log("No pending order found for reference:", reference);
-      console.log("This might mean payment was already verified by user");
+    if (result.rows.length === 0) {
+      await client.query("ROLLBACK");
+      await logUnappliedPayment(reference);
+      return;
     }
+
+    order = result.rows[0];
+
+    console.log("Order updated:", {
+      order_id: order.id,
+      user_id: order.user_id,
+      previous_status: "pending",
+      new_status: order.status,
+    });
+
+    // Update Product Inventory
+    await updateProductInventory(order.id, client);
+
+    // Only clear cart if order was actually updated (was pending)
+    // This prevents clearing cart if user already verified payment
+    const cartClearResult = await client.query(
+      `DELETE FROM cart_items WHERE cart_id IN (SELECT id FROM carts WHERE user_id = $1)`,
+      [order.user_id]
+    );
+
+    if (cartClearResult.rowCount > 0) {
+      console.log(
+        `Cleared ${cartClearResult.rowCount} items from cart for user ${order.user_id}`
+      );
+    } else {
+      console.log("Cart was already empty or cleared");
+    }
+
+    // Log the payment transaction for audit trail
+    await client.query(
+      `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+      ON CONFLICT (payment_reference) DO NOTHING`,
+      [
+        order.id,
+        reference,
+        "paid",
+        amount / 100, // Convert from kobo to naira
+        channel,
+        "webhook",
+        JSON.stringify(data.gateway_response) || "Payment successful",
+      ]
+    );
+
+    // Update order status history
+    await client.query(
+      `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
+      [order.id, "processing", "Payment verified, order is being processed"]
+    );
+
+    await client.query("COMMIT");
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error("Error processing successful payment:", {
       error: err.message,
       stack: err.stack,
     });
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  // Create transporter
+  const transporter = createTransporter();
+
+  // Email options
+  const mailOptions = {
+    from: `E-commerce API <${process.env.EMAIL_USER}>`,
+    to: customer.email,
+    subject: "Payment Confirmed - Your Order is Being Processed",
+    html: `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      <!-- Header -->
+      <div style="text-align: center; border-bottom: 2px solid #28a745; padding-bottom: 20px; margin-bottom: 30px;">
+        <h1 style="color: #333; margin: 0;">✅ Payment Confirmed!</h1>
+        <p style="color: #666; margin: 5px 0;">Your order is now being processed</p>
+      </div>
+
+      <!-- Greeting -->
+      <p style="font-size: 16px;">Hi ${customer.name || "Valued Customer"},</p>
+      <p>Great news! Your payment for order <strong>#${
+        order.id
+      }</strong> has been successfully confirmed. Your order is now being processed and will be prepared for shipment.</p>
+      
+      <!-- Success Banner -->
+      <div style="background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; padding: 15px; border-radius: 8px; margin: 20px 0; text-align: center;">
+        <strong>🎉 Payment Successfully Processed</strong>
+      </div>
+
+      <!-- Order Details Card -->
+      <div style="background-color: #f8f9fa; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 4px solid #28a745;">
+        <h3 style="margin-top: 0; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Payment & Order Details</h3>
+        <table style="width: 100%; border-collapse: collapse;">
+          <tr>
+            <td style="padding: 10px 0; font-weight: bold; color: #555;">Order ID:</td>
+            <td style="padding: 10px 0; color: #007bff; font-weight: bold;">#${
+              order.id
+            }</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 0; font-weight: bold; color: #555;">Order Status:</td>
+            <td style="padding: 10px 0;">
+              <span style="background-color: #ffc107; color: #000; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">
+                ${order.order_status.toUpperCase()}
+              </span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 0; font-weight: bold; color: #555;">Payment Reference:</td>
+            <td style="padding: 10px 0; font-family: monospace; background-color: #e9ecef; padding: 5px 8px; border-radius: 4px;">${
+              order.payment_ref
+            }</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 0; font-weight: bold; color: #555;">Payment Method:</td>
+            <td style="padding: 10px 0; text-transform: capitalize;">${
+              order.payment_method
+            }</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 0; font-weight: bold; color: #555;">Amount Paid:</td>
+            <td style="padding: 10px 0; font-size: 18px; color: #28a745; font-weight: bold;">
+              ₦${(amount / 100).toLocaleString()}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 0; font-weight: bold; color: #555;">Payment Date:</td>
+            <td style="padding: 10px 0;">${new Date().toLocaleDateString(
+              "en-US",
+              {
+                year: "numeric",
+                month: "long",
+                day: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              }
+            )}</td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- Next Steps -->
+      <div style="background-color: #e8f4f8; padding: 20px; border-radius: 8px; margin: 25px 0;">
+        <h3 style="margin-top: 0; color: #2c5aa0;">📦 What Happens Next?</h3>
+        <ol style="padding-left: 20px; line-height: 1.6;">
+          <li><strong>Order Processing</strong> - We're preparing your items for shipment</li>
+          <li><strong>Quality Check</strong> - Each item is carefully inspected</li>
+          <li><strong>Packaging</strong> - Your order will be securely packaged</li>
+          <li><strong>Shipping</strong> - You'll receive tracking information via email</li>
+          <li><strong>Delivery</strong> - Your order will arrive at your specified address</li>
+        </ol>
+        <p style="margin-bottom: 0; font-size: 14px; color: #666;">
+          <strong>Estimated processing time:</strong> 1-2 business days
+        </p>
+      </div>
+
+      <!-- Track Order Section -->
+      <div style="text-align: center; margin: 30px 0;">
+        <p>Want to track your order?</p>
+        <a href="${process.env.BASE_URL}/v1/order/${order.id}/history" 
+          style="display: inline-block; background-color: #007bff; color: white; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: bold;">
+          Track Your Order
+        </a>
+      </div>
+
+      <!-- Support Section -->
+      <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 25px 0;">
+        <h4 style="margin-top: 0; color: #333;">Need Help? 🤝</h4>
+        <p style="margin-bottom: 10px;">Our customer support team is here to help:</p>
+        <ul style="list-style: none; padding-left: 0;">
+          <li style="margin: 8px 0;">📧 <strong>Email:</strong> ${process.env.EMAIL_USER}</li>
+          <li style="margin: 8px 0;">📞 <strong>Phone:</strong> ${process.env.SUPPORT_PHONE || '+234-XXX-XXXX-XXX'}</li>
+          <li style="margin: 8px 0;">💬 <strong>Live Chat:</strong> Available on our website</li>
+        </ul>
+        <p style="font-size: 14px; color: #666; margin-bottom: 0;">
+          Please reference Order ID <strong>#${
+            order.id
+          }</strong> when contacting support.
+        </p>
+      </div>
+
+      <!-- Social Media & Reviews -->
+      <div style="text-align: center; margin: 30px 0; padding: 20px; background-color: #fff3cd; border-radius: 8px;">
+        <h4 style="margin-top: 0;">Love your purchase? 💝</h4>
+        <p style="margin-bottom: 15px;">Share your experience and help others discover great products!</p>
+        <div style="margin: 15px 0;">
+          <a href="#" style="text-decoration: none; margin: 0 10px; font-size: 24px;">📘</a>
+          <a href="#" style="text-decoration: none; margin: 0 10px; font-size: 24px;">📷</a>
+          <a href="#" style="text-decoration: none; margin: 0 10px; font-size: 24px;">🐦</a>
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <div style="text-align: center; padding-top: 30px; border-top: 1px solid #ddd; margin-top: 40px;">
+        <p style="font-size: 18px; margin-bottom: 10px;">Thank you for shopping with us! 🛍️</p>
+        <p style="color: #666; margin-bottom: 20px;">
+          Best regards,<br>
+          <strong>The E-commerce API Team</strong>
+        </p>
+        
+        <!-- Email Footer -->
+        <div style="font-size: 12px; color: #999; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
+          <p>This email was sent to <strong>${customer.email}</strong></p>
+          <p>© 2024 E-commerce API. All rights reserved.</p>
+          <p>If you have any concerns about this transaction, please contact us immediately.</p>
+        </div>
+      </div>
+    </div>
+  `,
+  };
+
+  // Send email
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log("Payment Confirmation Email sent successfully");
+  } catch (emailError) {
+    console.log("Email sending failed:", emailError.message);
   }
 };
 
 // Failed payment handler
 const handleFailedPayment = async (data) => {
+  const client = await db.connect();
+
   try {
     const { reference, gateway_response, customer } = data;
 
@@ -439,14 +457,16 @@ const handleFailedPayment = async (data) => {
             RETURNING *
         `;
 
-    const result = await db.query(updateQuery, [reference]);
+    await client.query("BEGIN");
+
+    const result = await client.query(updateQuery, [reference]);
 
     if (result.rows.length > 0) {
       const order = result.rows[0];
       console.log(`Order ${order.id} marked as failed`);
 
       // Log the failed payment
-      await db.query(
+      await client.query(
         `INSERT INTO payment_logs (order_id, payment_reference, status, failure_reason, processed_by, created_at)
         VALUES ($1, $2, $3, $4, $5, now())
         ON CONFLICT (payment_reference) DO NOTHING`,
@@ -454,7 +474,7 @@ const handleFailedPayment = async (data) => {
       );
 
       // Update order status history
-      await db.query(
+      await client.query(
         `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
         [order.id, "failed", `Payment verification failed`]
       );
@@ -464,11 +484,36 @@ const handleFailedPayment = async (data) => {
         reference
       );
     }
+
+    await client.query("COMMIT");
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error("Error processing failed payment:", {
       error: err.message,
       stack: err.stack,
     });
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+
+// A successful charge that couldn't be applied to a pending order. If the order
+// was cancelled or expired, the customer has paid for nothing and needs a refund.
+const logUnappliedPayment = async (reference) => {
+  const existing = await db.query(
+    "SELECT id, status, order_status FROM orders WHERE payment_ref = $1",
+    [reference]
+  );
+  const order = existing.rows[0];
+
+  if (order && order.order_status === "cancelled" && order.status !== "paid") {
+    console.error(
+      `REFUND REQUIRED: payment ${reference} received for cancelled order ${order.id}`
+    );
+  } else {
+    console.log("No pending order found for reference:", reference);
+    console.log("This might mean payment was already verified by user");
   }
 };
 
@@ -760,90 +805,6 @@ const handlePendingRefund = async (data) => {
     })
   }
 }
-
-// Update product inventory. Pass `externalClient` to run inside the caller's
-// transaction (errors are rethrown); otherwise it runs in its own transaction.
-export const updateProductInventory = async (orderId, externalClient = null) => {
-  const client = externalClient || (await db.connect());
-
-  try {
-    if (!externalClient) await client.query("BEGIN");
-
-    console.log(`Updating inventory for ORDER ID: ${orderId}`);
-
-    // Get order items, locking product rows so concurrent payments can't
-    // overwrite each other's stock updates (ordered to avoid deadlocks)
-    const orderItemsQuery = `
-            SELECT
-                oi.product_id,
-                oi.quantity as ordered_quantity,
-                p.name as product_name,
-                p.inventory_qty as current_stock
-            FROM order_items oi
-            JOIN products p ON oi.product_id = p.id
-            WHERE oi.order_id = $1
-            ORDER BY oi.product_id
-            FOR UPDATE OF p
-        `;
-
-    const orderItemsResult = await client.query(orderItemsQuery, [orderId]);
-
-    if (orderItemsResult.rows.length === 0) {
-      console.log(`No order items found for ORDER ID: ${orderId}`);
-      if (!externalClient) await client.query("COMMIT");
-      return;
-    }
-
-    for (const item of orderItemsResult.rows) {
-      const { product_id, ordered_quantity, product_name, current_stock } =
-        item;
-
-      if (ordered_quantity > current_stock) {
-        // Paid order exceeds available stock - needs manual follow-up (refund/backorder)
-        console.error(
-          `OVERSOLD: order ${orderId} needs ${ordered_quantity} x ${product_name} (${product_id}) but only ${current_stock} in stock`
-        );
-      }
-
-      const newStockQuantity = Math.max(0, current_stock - ordered_quantity);
-
-      await client.query(
-        `UPDATE products
-        SET inventory_qty = $1, updated_at = now()
-        WHERE id = $2`,
-        [newStockQuantity, product_id]
-      );
-
-      console.log(
-        `Updated inventory for ${product_name}: ${current_stock} -> ${newStockQuantity}`
-      );
-
-      // Update product status if it goes out of stock
-      if (newStockQuantity === 0) {
-        await client.query(
-          `UPDATE products SET status = 'out_of_stock' WHERE id = $1`,
-          [product_id]
-        );
-        console.log(`Product ${product_name} is now out of stock`);
-      }
-    }
-    if (!externalClient) await client.query("COMMIT");
-
-    console.log(`Updated inventory successfully for order ${orderId}`);
-  } catch (err) {
-    console.error("Error updating product inventory:", {
-      error: err.message,
-      stack: err.stack,
-      orderId: orderId,
-    });
-
-    // Caller owns the transaction, let it roll back
-    if (externalClient) throw err;
-    await client.query("ROLLBACK");
-  } finally {
-    if (!externalClient) client.release();
-  }
-};
 
 // Get payment status
 export const getPaymentStatus = async (req, res) => {

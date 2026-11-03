@@ -1,7 +1,11 @@
 import axios from "axios";
 
 import db from "../../config/db.js";
-import { updateProductInventory } from "./paymentController.js";
+import {
+  reserveOrderInventory,
+  releaseOrderInventory,
+  updateProductInventory,
+} from "../../utils/inventory.js";
 import createTransporter from "../../utils/email.js";
 
 // create order
@@ -115,6 +119,25 @@ export const createOrder = async (req, res) => {
       ]);
     }
 
+    // Reserve stock under lock - the check above can be stale under concurrency
+    const insufficientItems = await reserveOrderInventory(order.id, client);
+
+    if (insufficientItems.length > 0) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        success: false,
+        message: "Some items are out of stock",
+        data: {
+          out_of_stock_items: insufficientItems.map(item => ({
+            product_id: item.product_id,
+            name: item.product_name,
+            requested: item.quantity,
+            available: item.current_stock
+          }))
+        }
+      });
+    }
+
     // Log order creation history
     await client.query(
       `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, 'pending', 'Order created')`,
@@ -132,9 +155,14 @@ export const createOrder = async (req, res) => {
     // Commit before calling Paystack so the transaction isn't held open during the HTTP request
     await client.query("COMMIT");
 
-    // Remove the order (items and history cascade) if payment can't be initialized
-    const discardOrder = () =>
-      db.query("DELETE FROM orders WHERE id = $1", [order.id]);
+    // Release the stock and remove the order (items and history cascade)
+    // if payment can't be initialized
+    const discardOrder = async () => {
+      await client.query("BEGIN");
+      await releaseOrderInventory(order.id, client);
+      await client.query("DELETE FROM orders WHERE id = $1", [order.id]);
+      await client.query("COMMIT");
+    };
 
     // Initialize paystack payment
     const paymentData = {
@@ -416,13 +444,10 @@ export const verifyPayment = async (req, res) => {
   const client = await db.connect();
 
   try {
-    await client.query("BEGIN");
-
     const { reference } = req.params;
     const userId = req.user.id;
 
     if (!reference || typeof reference !== "string") {
-      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
         message: "Invalid payment reference",
@@ -436,7 +461,6 @@ export const verifyPayment = async (req, res) => {
     );
 
     if (orderCheck.rows.length === 0) {
-      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
         message: "Payment not found or access denied",
@@ -447,7 +471,6 @@ export const verifyPayment = async (req, res) => {
 
     // Check if payment has already been verified
     if (order.status === "paid") {
-      await client.query("COMMIT");
       return res.status(200).json({
         success: true,
         message: 'Payment has already been verified',
@@ -477,7 +500,6 @@ export const verifyPayment = async (req, res) => {
       console.log("Paystack verification response:", verificationResponse.data);
 
       if (!verificationResponse.data.status) {
-        await client.query("ROLLBACK");
         return res.status(500).json({
           success: false,
           message: "Payment verification failed",
@@ -487,18 +509,31 @@ export const verifyPayment = async (req, res) => {
       }
 
       const data = verificationResponse.data.data;
+
+      // abandoned/ongoing/pending: customer hasn't finished paying yet
+      if (!["success", "failed"].includes(data.status)) {
+        return res.status(200).json({
+          success: true,
+          message: "Payment has not been completed yet",
+          data: { payment_status: data.status },
+        });
+      }
+
       const paymentStatus = data.status === "success" ? "paid" : "failed";
       const paymentMethod = data.channel;
+
+      // Transaction starts after the Paystack call so it isn't held open during HTTP
+      await client.query("BEGIN");
 
       // update order status
       const updateQuery = `
       UPDATE orders
       SET
-        status = $1, 
+        status = $1,
         payment_method = $2,
         order_status = CASE WHEN $1 = 'paid' THEN 'processing' ELSE order_status END,
         updated_at = now()
-      WHERE payment_ref = $3 AND status = 'pending'
+      WHERE payment_ref = $3 AND status = 'pending' AND order_status <> 'cancelled'
       RETURNING *
     `;
 
@@ -508,12 +543,13 @@ export const verifyPayment = async (req, res) => {
         reference,
       ]);
 
-      // Webhook processed this payment while we were verifying
+      // Webhook processed this payment while we were verifying, or the order
+      // was cancelled/expired
       if (result.rows.length === 0) {
         await client.query("ROLLBACK");
-        return res.status(200).json({
-          success: true,
-          message: "Payment has already been verified",
+        return res.status(409).json({
+          success: false,
+          message: "Order is no longer awaiting payment",
         });
       }
 
@@ -568,7 +604,12 @@ export const verifyPayment = async (req, res) => {
 
         console.log("Order status history updated");
 
+        // Commit before emailing so the customer is only notified of saved changes
+        await client.query("COMMIT");
+        console.log("Transaction committed successfully");
+
         // Send Payment Confirmation Email
+        const customer = { email: req.user.email };
         const transporter = createTransporter();
 
         // Email options
@@ -744,11 +785,10 @@ export const verifyPayment = async (req, res) => {
           `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
           [updatedOrder.id, "failed", "Payment verification failed"]
         );
-      }
 
-      // Commit transaction
-      await client.query("COMMIT");
-      console.log("Transaction committed successfully");
+        await client.query("COMMIT");
+        console.log("Transaction committed successfully");
+      }
 
       res.status(200).json({
         success: true,
@@ -959,6 +999,7 @@ export const cancelOrder = async (req, res) => {
       FROM orders o
       LEFT JOIN users u ON o.user_id = u.id
       WHERE o.id = $1 AND o.user_id = $2
+      FOR UPDATE OF o
       `,
       [orderId, userId]
     );
@@ -1060,28 +1101,8 @@ export const cancelOrder = async (req, res) => {
       [orderId, "cancelled", `Order cancelled by user`]
     );
 
-    // Restore product stock - only paid orders had stock deducted
-    const itemsQuery =
-      order.status === "paid"
-        ? await client.query(
-            `SELECT product_id, quantity FROM order_items WHERE order_id = $1`,
-            [orderId]
-          )
-        : { rows: [] };
-
-    for (const item of itemsQuery.rows) {
-      const productExists = await client.query(
-        "SELECT id FROM products WHERE id = $1",
-        [item.product_id]
-      );
-
-      if (productExists.rows.length > 0) {
-        await client.query(
-          `UPDATE products SET inventory_qty = inventory_qty + $1 WHERE id=$2`,
-          [item.quantity, item.product_id]
-        );
-      }
-    }
+    // Restore product stock held by this order
+    await releaseOrderInventory(orderId, client);
 
     // Commit transaction
     await client.query("COMMIT");

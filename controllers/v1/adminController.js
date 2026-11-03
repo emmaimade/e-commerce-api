@@ -1,7 +1,10 @@
 import axios from "axios";
 
 import db from "../../config/db.js";
-import { updateProductInventory } from "./paymentController.js";
+import {
+  releaseOrderInventory,
+  updateProductInventory,
+} from "../../utils/inventory.js";
 import { uploadMultipleToCloudinary, deleteFromCloudinary } from "../../utils/cloudinaryUpload.js";
 import { getNextDayString, isValidDateFormat} from "../../utils/dateHelpers.js";
 import createTransporter from "../../utils/email.js";
@@ -786,8 +789,6 @@ export const getOrderAdmin = async (req, res) => {
 export const verifyPaymentAdmin = async (req, res) => {
   const client = await db.connect();
   try {
-    await client.query("BEGIN");
-
     const { reference } = req.body;
 
     // Input validation
@@ -805,7 +806,6 @@ export const verifyPaymentAdmin = async (req, res) => {
     );
 
     if (existingOrder.rows.length === 0) {
-      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
         message: "Payment reference not found",
@@ -816,7 +816,6 @@ export const verifyPaymentAdmin = async (req, res) => {
 
     // Check if payment has already been verified
     if (order.status === "paid") {
-      await client.query("COMMIT");
       return res.status(409).json({
         success: true,
         message: "Payment already verified",
@@ -852,8 +851,6 @@ export const verifyPaymentAdmin = async (req, res) => {
       if (!verificationResponse.data.status) {
         console.error("Paystack verification failed:", verificationResponse.data);
 
-        await client.query("ROLLBACK");
-
         return res.status(400).json({
           success: false,
           message: "Payment verification failed",
@@ -863,18 +860,31 @@ export const verifyPaymentAdmin = async (req, res) => {
       }
 
       const data = verificationResponse.data.data;
+
+      // abandoned/ongoing/pending: customer hasn't finished paying yet
+      if (!["success", "failed"].includes(data.status)) {
+        return res.status(200).json({
+          success: true,
+          message: "Payment has not been completed yet",
+          data: { payment_status: data.status },
+        });
+      }
+
       const paymentStatus = data.status === "success" ? "paid" : "failed";
       const paymentMethod = data.channel;
+
+      // Transaction starts after the Paystack call so it isn't held open during HTTP
+      await client.query("BEGIN");
 
       // update order status
       const updateQuery = `
       UPDATE orders
       SET
-        status = $1, 
-        payment_method = $2, 
+        status = $1,
+        payment_method = $2,
         order_status = CASE WHEN $1 = 'paid' THEN 'processing' ELSE order_status END,
         updated_at = now()
-      WHERE payment_ref = $3 AND status = 'pending'
+      WHERE payment_ref = $3 AND status = 'pending' AND order_status <> 'cancelled'
       RETURNING *
     `;
 
@@ -884,12 +894,13 @@ export const verifyPaymentAdmin = async (req, res) => {
         reference,
       ]);
 
-      // Order was no longer pending (e.g. webhook processed it concurrently)
+      // Order was no longer pending (e.g. webhook processed it concurrently,
+      // or it was cancelled/expired)
       if (result.rows.length === 0) {
         await client.query("ROLLBACK");
         return res.status(409).json({
           success: false,
-          message: "Payment already processed",
+          message: "Order is no longer awaiting payment",
         });
       }
 
@@ -918,10 +929,13 @@ export const verifyPaymentAdmin = async (req, res) => {
           [result.rows[0].id, "processing", "Payment verified by admin, order is being processed"]
         );
 
+        // Commit before emailing so the customer is only notified of saved changes
+        await client.query("COMMIT");
+
         // Send email to customer
         try {
           const customerQuery = await client.query(
-            "SELECT email, first_name FROM users WHERE id = $1",
+            "SELECT email, name FROM users WHERE id = $1",
             [result.rows[0].user_id]
           );
           
@@ -1084,9 +1098,9 @@ export const verifyPaymentAdmin = async (req, res) => {
           "INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)",
           [result.rows[0].id, "failed", "Payment verification failed"]
         );
-      }
 
-      await client.query("COMMIT");
+        await client.query("COMMIT");
+      }
 
       res.status(200).json({
         success: true,
@@ -1141,6 +1155,7 @@ export const updateOrderStatus = async (req, res) => {
 
     // Input validation
     if (!status) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
         message: "Order status is required",
@@ -1150,6 +1165,7 @@ export const updateOrderStatus = async (req, res) => {
     // Validate status
     const validStatuses = ["processing", "shipped", "delivered", "cancelled"];
     if (!validStatuses.includes(status)) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
         message: `Invalid status. Valid statuses are: ${validStatuses.join(", ")}`,
@@ -1163,7 +1179,8 @@ export const updateOrderStatus = async (req, res) => {
         u.email, u.name 
       FROM orders o
       JOIN users u ON o.user_id = u.id
-      WHERE o.id = $1`,
+      WHERE o.id = $1
+      FOR UPDATE OF o`,
       [orderId]
     );
 
@@ -1189,6 +1206,11 @@ export const updateOrderStatus = async (req, res) => {
     `;
 
     const result = await client.query(query, [status, orderId]);
+
+    // Return held stock to inventory when an order is cancelled
+    if (status === "cancelled") {
+      await releaseOrderInventory(orderId, client);
+    }
 
     // Update Order Status History
     await client.query(

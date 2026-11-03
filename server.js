@@ -15,6 +15,7 @@ import adminRoutes from './routes/v1/adminRoutes.js';
 import paymentRoutes from './routes/v1/paymentRoutes.js';
 import shippingRoutes from './routes/v1/shippingRoutes.js';
 import { handleUploadErrors } from './middleware/errorHandler.js';
+import { startOrderExpiryJob } from './utils/orderExpiry.js';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -111,4 +112,7 @@ app.listen(port, () => {
     console.log(`Server is running on http://localhost:${port}`);
     console.log(`API Documentation: http://localhost:${port}/v1/docs`);
     console.log(`Health Check: http://localhost:${port}/health`);
+
+    // Cancel unpaid orders after the payment window and release their stock
+    startOrderExpiryJob();
 })
