@@ -116,3 +116,14 @@ CREATE INDEX idx_payment_logs_status ON payment_logs(status);
 CREATE INDEX IF NOT EXISTS idx_order_status_history_order_id ON order_status_history(order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_order_status ON orders(order_status);
 CREATE INDEX IF NOT EXISTS idx_orders_pending_placed_at ON orders(placed_at) WHERE order_status = 'pending';
+
+-- Block access through hosted REST APIs (e.g. Supabase); the app connects as table owner and is unaffected
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE addresses ENABLE ROW LEVEL SECURITY;
+ALTER TABLE products ENABLE ROW LEVEL SECURITY;
+ALTER TABLE carts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cart_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE order_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE order_status_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_logs ENABLE ROW LEVEL SECURITY;
