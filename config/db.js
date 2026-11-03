@@ -5,9 +5,12 @@ dotenv.config();
 
 const { Pool } = pg;
 
+// Hosted databases (Supabase, Render) require SSL; a local Postgres usually doesn't support it
+const isLocalDb = /@(localhost|127\.0\.0\.1)[:/]/.test(process.env.DATABASE_URL || '');
+
 const db = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+    ssl: isLocalDb ? false : { rejectUnauthorized: false }
 });
 
 // Test the database connection

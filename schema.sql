@@ -1,4 +1,4 @@
-CREATE DATABASE ecommerce;
+-- Run against an existing database (locally: CREATE DATABASE ecommerce; first)
 
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -115,3 +115,4 @@ CREATE INDEX idx_payment_logs_order_id ON payment_logs(order_id);
 CREATE INDEX idx_payment_logs_status ON payment_logs(status);
 CREATE INDEX IF NOT EXISTS idx_order_status_history_order_id ON order_status_history(order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_order_status ON orders(order_status);
+CREATE INDEX IF NOT EXISTS idx_orders_pending_placed_at ON orders(placed_at) WHERE order_status = 'pending';
