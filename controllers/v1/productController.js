@@ -1,4 +1,5 @@
 import db from "../../config/db.js";
+import { isValidUuid } from "../../utils/validators.js";
 
 export const getProducts = async (req, res) => {
   try {
@@ -136,7 +137,7 @@ export const getProduct = async (req, res) => {
   try {
     const productId = req.params.id;
 
-    if (!productId || isNaN(productId)) {
+    if (!isValidUuid(productId)) {
       return res.status(400).json({
         success: false,
         message: "Invalid product ID",

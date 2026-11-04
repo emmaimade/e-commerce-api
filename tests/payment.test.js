@@ -5,7 +5,7 @@ import request from "supertest";
 import app from "../app.js";
 import {
   db, resetDatabase, clearTables, closeDatabase, createUser, createAddress,
-  createProduct, addToCart, getStock, getOrder, countRows,
+  createProduct, addToCart, getStock, getOrder, countRows, leakedConnections, openTransactions,
 } from "./helpers/db.js";
 import {
   mockEmail, mockPaystackInit, mockPaystackVerify, signedWebhook, restoreMocks,
@@ -135,6 +135,63 @@ describe("Paystack webhook", () => {
     assert.equal(res.status, 200);
     assert.equal((await getOrder(orderId)).status, "failed");
     assert.equal(await getStock(productId), 3);
+  });
+});
+
+describe("GET /v1/payments/callback", () => {
+  before(resetDatabase);
+  beforeEach(async () => {
+    await clearTables();
+    mockEmail();
+    mockPaystackInit();
+  });
+  afterEach(restoreMocks);
+
+  const callback = (reference) =>
+    request(app).get("/v1/payments/callback").query({ trxref: reference, reference });
+
+  it("shows a paid order as confirmed", async () => {
+    const { user, reference } = await placeOrder();
+    await sendWebhook(chargeSuccess(reference, user.email));
+
+    const res = await callback(reference);
+
+    assert.equal(res.status, 200);
+    assert.match(res.headers["content-type"], /text\/html/);
+    assert.match(res.text, /Payment confirmed/);
+  });
+
+  it("shows an unconfirmed order as still processing", async () => {
+    const { reference } = await placeOrder();
+
+    const res = await callback(reference);
+
+    assert.equal(res.status, 200);
+    assert.match(res.text, /being confirmed/);
+  });
+
+  it("doesn't echo the reference back into the page", async () => {
+    const res = await callback("<script>alert(1)</script>");
+
+    assert.equal(res.status, 200);
+    assert.doesNotMatch(res.text, /<script>/);
+  });
+});
+
+describe("GET /v1/admin/payments/logs", () => {
+  before(resetDatabase);
+  beforeEach(clearTables);
+
+  it("leaves no transaction open after rejecting a date filter", async () => {
+    const admin = await createUser({ role: "admin" });
+
+    const res = await request(app)
+      .get("/v1/admin/payments/logs?date_from=not-a-date")
+      .set("Authorization", `Bearer ${admin.token}`);
+
+    assert.equal(res.status, 400);
+    assert.equal(await openTransactions(), 0);
+    assert.equal(leakedConnections(), 0);
   });
 });
 

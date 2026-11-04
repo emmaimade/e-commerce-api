@@ -4,8 +4,6 @@ export const addToCart = async (req, res) => {
   const client = await db.connect();
 
   try {
-    await client.query("BEGIN");
-
     const userId = req.user.id;
     const { productId, quantity } = req.body;
 
@@ -25,6 +23,8 @@ export const addToCart = async (req, res) => {
       });
     }
 
+    await client.query("BEGIN");
+
     // checks if product exists
     const product = await client.query("SELECT * from products WHERE id = $1", [
       productId,
@@ -39,6 +39,7 @@ export const addToCart = async (req, res) => {
 
     // checks if quantity is less than inventory
     if (product.rows[0].inventory_qty < quantity) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
         message: "Quantity exceeds available inventory",
@@ -194,8 +195,6 @@ export const updateItemQty = async (req, res) => {
   const client = await db.connect();
 
   try {
-    await client.query("BEGIN");
-
     const userId = req.user.id;
     const itemId = req.params.id;
     const quantity = parseInt(req.body.quantity);
@@ -206,6 +205,8 @@ export const updateItemQty = async (req, res) => {
         error: "Quantity must be between 1 and 99",
       });
     }
+
+    await client.query("BEGIN");
 
     // checks if item belongs to user cart
     const query = `
@@ -231,6 +232,7 @@ export const updateItemQty = async (req, res) => {
 
     // check product availability
     if (quantity > item.inventory_qty) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
         error: `Only ${item.inventory_qty} items available in stock`,
@@ -240,7 +242,7 @@ export const updateItemQty = async (req, res) => {
     // update quantity
     const updateQuery = `
         UPDATE cart_items
-        SET quantity = $1, updated_at = NOW()
+        SET quantity = $1
         WHERE id = $2
         RETURNING *
     `;

@@ -51,11 +51,7 @@ export const adminGetUser = async (req, res) => {
 // ========================================
 
 export const addProduct = async (req, res) => {
-  const client = await db.connect()
-
   try {
-    await client.query("BEGIN");
-
     const { name, description, price, inventory_qty, image_urls } = req.body;
     let images = [];
 
@@ -134,8 +130,8 @@ export const addProduct = async (req, res) => {
     }
     console.log(typeof(images));
 
-    const newProduct = await client.query(
-      `INSERT INTO products (name, description, price, inventory_qty, images) 
+    const newProduct = await db.query(
+      `INSERT INTO products (name, description, price, inventory_qty, images)
       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
       [name, description, priceNum, inventoryNum, JSON.stringify(images)]
     );
@@ -146,9 +142,6 @@ export const addProduct = async (req, res) => {
       product.images = JSON.parse(product.images);
     }
 
-    // Commit transaction
-    await client.query("COMMIT");
-
     res.status(201).json({
       success: true,
       message: "Product added successfully",
@@ -156,8 +149,7 @@ export const addProduct = async (req, res) => {
     });
   } catch (err) {
     console.log("Error adding product", err);
-    await client.query("ROLLBACK");
-    res.status(500).json({ 
+    res.status(500).json({
         success: false,
         message: "Error adding product",
         error: err.message
@@ -1519,11 +1511,7 @@ export const getPaymentStatusAdmin = async (req, res) => {
 };
 
 export const getPaymentLogs = async (req, res) => {
-  const client = await db.connect();
-
   try {
-    await client.query("BEGIN");
-
     const {
       page = 1,
       limit = 20,
@@ -1659,8 +1647,8 @@ export const getPaymentLogs = async (req, res) => {
 
     // Execute both queries
     const [logsResult, countResult] = await Promise.all([
-      client.query(logsQuery, queryParams),
-      client.query(countQuery, countParams),
+      db.query(logsQuery, queryParams),
+      db.query(countQuery, countParams),
     ]);
 
     const logs = logsResult.rows;
@@ -1684,7 +1672,7 @@ export const getPaymentLogs = async (req, res) => {
       ${whereClause}
     `;
     
-    const statsResult = await client.query(statsQuery, countParams);
+    const statsResult = await db.query(statsQuery, countParams);
     const stats = statsResult.rows[0];
 
     // Format response
@@ -1710,9 +1698,6 @@ export const getPaymentLogs = async (req, res) => {
       failure_reason: log.failure_reason,
       gateway_response: log.gateway_response,
     }));
-
-    // Commit transaction
-    await client.query("COMMIT");
 
     res.status(200).json({
       success: true,
@@ -1750,15 +1735,11 @@ export const getPaymentLogs = async (req, res) => {
     })
   } catch (err) {
     console.error("Error fetching payment logs:", err);
-
-    await client.query("ROLLBACK");
     res.status(500).json({ 
       success: false, 
       message: "Failed to fetch payment logs",
       error: err.message 
     });
-  } finally {
-    client.release();
   }
 };
 

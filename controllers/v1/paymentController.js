@@ -806,6 +806,41 @@ const handlePendingRefund = async (data) => {
   }
 }
 
+// Landing page after Paystack checkout. Display only: the webhook confirms payments
+export const paymentCallback = async (req, res) => {
+  try {
+    const { reference } = req.query;
+    const result =
+      typeof reference === "string"
+        ? await db.query("SELECT status FROM orders WHERE payment_ref = $1", [reference])
+        : { rows: [] };
+
+    const paid = result.rows[0]?.status === "paid";
+    const heading = paid ? "Payment confirmed" : "Your payment is being confirmed";
+    const message = paid
+      ? "Thank you! Your order is now being processed."
+      : "We'll email you as soon as your payment is confirmed. You can safely close this page.";
+
+    res.type("html").send(`
+      <!doctype html>
+      <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>${heading}</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; max-width: 400px; margin: 40px auto; padding: 0 16px; text-align: center;">
+          <h2 style="color: #333;">${heading}</h2>
+          <p style="color: #666;">${message}</p>
+        </body>
+      </html>
+    `);
+  } catch (err) {
+    console.error("Error showing payment callback:", err);
+    res.status(500).type("html").send("<p>Something went wrong. Please check your email for your order status.</p>");
+  }
+};
+
 // Get payment status
 export const getPaymentStatus = async (req, res) => {
   try {

@@ -169,7 +169,7 @@ export const createOrder = async (req, res) => {
       email: req.user.email,
       amount: total * 100, // convert to kobo
       reference: paymentReference,
-      callback_url: `${process.env.BASE_URL}/payment/callback?reference=${paymentReference}`,
+      callback_url: `${process.env.BASE_URL}/v1/payments/callback`,
       metadata: {
         order_id: order.id,
         user_id: userId,
@@ -829,10 +829,7 @@ export const verifyPayment = async (req, res) => {
 
 // get all user orders
 export const getOrders = async (req, res) => {
-  const client = await db.connect();
   try {
-    await client.query("BEGIN");
-
     const userId = req.user.id;
 
     const ordersQuery = `
@@ -849,7 +846,7 @@ export const getOrders = async (req, res) => {
       ORDER BY o.placed_at DESC
     `;
 
-    const orders = await client.query(ordersQuery, [userId]);
+    const orders = await db.query(ordersQuery, [userId]);
 
     if (orders.rows.length === 0) {
       return res.status(404).json({
@@ -858,16 +855,12 @@ export const getOrders = async (req, res) => {
       });
     }
 
-    // Commit transaction
-    await client.query("COMMIT");
-
     res.status(200).json({
       success: true,
       data: orders.rows,
     });
   } catch (err) {
     console.log("Error getting orders", err);
-    await client.query("ROLLBACK");
     res.status(500).json({
       success: false,
       message: "Error getting orders",

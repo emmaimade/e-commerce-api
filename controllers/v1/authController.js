@@ -142,7 +142,7 @@ export const forgotPassword = async (req, res) => {
     const transporter = createTransporter();
 
     // Create reset URL
-    const resetUrl = `${process.env.BASE_URL}/v1/user/reset-password/${resetToken}`;
+    const resetUrl = `${process.env.BASE_URL}/v1/auth/reset-password/${resetToken}`;
 
     // Email options
     const mailOptions = {
@@ -183,6 +183,30 @@ export const forgotPassword = async (req, res) => {
     }); 
   }
 }
+
+// The emailed link opens in a browser, and there is no frontend yet to host this form
+export const showResetPasswordForm = (req, res) => {
+  // The token is in the URL, so don't send it to other sites
+  res.set("Referrer-Policy", "no-referrer");
+  res.type("html").send(`
+    <!doctype html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Reset Password</title>
+      </head>
+      <body style="font-family: Arial, sans-serif; max-width: 400px; margin: 40px auto; padding: 0 16px;">
+        <h2 style="color: #333;">Reset your password</h2>
+        <form method="post">
+          <p><label>New password<br><input type="password" name="password" minlength="6" required></label></p>
+          <p><label>Confirm password<br><input type="password" name="confirmPassword" minlength="6" required></label></p>
+          <button type="submit">Reset Password</button>
+        </form>
+      </body>
+    </html>
+  `);
+};
 
 export const resetPassword = async (req, res) => {
   try {

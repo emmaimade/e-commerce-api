@@ -5,7 +5,7 @@ import request from "supertest";
 import app from "../app.js";
 import {
   resetDatabase, clearTables, closeDatabase, createUser, createAddress,
-  createProduct, addToCart, getStock, getOrder, countRows,
+  createProduct, addToCart, getStock, getOrder, countRows, leakedConnections, openTransactions,
 } from "./helpers/db.js";
 import { mockEmail, mockPaystackInit, restoreMocks } from "./helpers/mocks.js";
 
@@ -105,6 +105,33 @@ describe("POST /v1/order (checkout)", () => {
     assert.equal(res.status, 500);
     assert.equal(await countRows("orders"), 0);
     assert.equal(await getStock(productId), 5);
+  });
+
+  it("sends Paystack a callback URL the app actually serves", async () => {
+    const initialize = mockPaystackInit();
+    const user = await createUser();
+    const addressId = await createAddress(user.id);
+    await addToCart(user.id, await createProduct(), 1);
+
+    await checkout(user, addressId);
+
+    const { callback_url } = initialize.mock.calls[0].arguments[1];
+    const { pathname, search } = new URL(callback_url);
+    assert.equal(pathname, "/v1/payments/callback");
+    // Paystack adds trxref and reference to the query string itself
+    assert.equal(search, "");
+  });
+
+  it("returns its connection when listing orders", async () => {
+    const user = await createUser();
+
+    const res = await request(app)
+      .get("/v1/order")
+      .set("Authorization", `Bearer ${user.token}`);
+
+    assert.equal(res.status, 404);
+    assert.equal(leakedConnections(), 0);
+    assert.equal(await openTransactions(), 0);
   });
 
   it("rejects a shipping address that belongs to another user", async () => {

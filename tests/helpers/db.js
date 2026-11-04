@@ -1,6 +1,7 @@
 import fs from "fs";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
+import pg from "pg";
 import db from "../../config/db.js";
 
 const schema = fs.readFileSync(new URL("../../schema.sql", import.meta.url), "utf8");
@@ -73,3 +74,17 @@ export const countRows = async (table, where = "TRUE", params = []) =>
   (await db.query(`SELECT count(*)::int AS n FROM ${table} WHERE ${where}`, params)).rows[0].n;
 
 export { db };
+
+// Connections checked out of the pool and not returned
+export const leakedConnections = () => db.totalCount - db.idleCount;
+
+// Uses its own connection: the pool could hand back the very connection being measured
+export const openTransactions = async () => {
+  const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  await client.connect();
+  const result = await client.query(
+    "SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND state = 'idle in transaction'"
+  );
+  await client.end();
+  return result.rows[0].n;
+};

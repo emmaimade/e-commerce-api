@@ -5,8 +5,17 @@ import nodemailer from "nodemailer";
 
 // Controllers share these module objects, so replacing their methods mocks every call
 
-export const mockEmail = () =>
-  mock.method(nodemailer, "createTransport", () => ({ sendMail: async () => ({}) }));
+// Returns the list of emails "sent" so tests can inspect them
+export const mockEmail = () => {
+  const sent = [];
+  mock.method(nodemailer, "createTransport", () => ({
+    sendMail: async (message) => {
+      sent.push(message);
+      return {};
+    },
+  }));
+  return sent;
+};
 
 export const mockPaystackInit = ({ ok = true, networkError = false } = {}) =>
   mock.method(axios, "post", async () => {
