@@ -8,7 +8,11 @@ import {
 } from "../../controllers/v1/shippingController.js";
 import { auth } from '../../middleware/auth.js';
 
+import { validateUuidParam } from '../../middleware/validate.js';
+
 const router = express.Router();
+
+router.param('id', validateUuidParam);
 
 router.get('/', auth, getUserShippingAddresses);
 router.get('/:id', auth, getShippingAddress);

@@ -21,7 +21,7 @@ export const getUser = async (req, res) => {
       user: user.rows[0],
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 };
 
@@ -99,7 +99,6 @@ export const updateUser = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to update user",
-      error: err.message,
     });
   }
 };

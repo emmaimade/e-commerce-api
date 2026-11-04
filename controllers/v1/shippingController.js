@@ -1,4 +1,5 @@
 import db from '../../config/db.js';
+import { FOREIGN_KEY_VIOLATION } from '../../utils/validators.js';
 import parsePhoneNumber from 'libphonenumber-js';
 import { getCode, getData, getNameList } from 'country-list';
 
@@ -98,7 +99,6 @@ export const addShippingAddress = async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Server Error',
-            error: err.message,
         });
     }
 };
@@ -122,7 +122,6 @@ export const getUserShippingAddresses = async (req, res) => {
         res.status(500).json({
             success: false,
             message: "Failed to get shipping addresses",
-            error: err.message
         });
     }
 }
@@ -154,7 +153,6 @@ export const getShippingAddress = async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Failed to get shipping address',
-            error: err.message
         });
     }
 }
@@ -199,8 +197,8 @@ export const updateShippingAddress = async (req, res) => {
 
     // Filter only allowed fields
     for (const [key, value] of Object.entries(updates)) {
-      if (allowedFields.includes(key) && value.trim()&& value !== undefined && value !== "") {
-        allowedUpdates[key] = value.trim();
+      if (allowedFields.includes(key) && value !== undefined && value !== null && String(value).trim() !== "") {
+        allowedUpdates[key] = String(value).trim();
       }
     }
 
@@ -372,7 +370,6 @@ export const updateShippingAddress = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to update shipping address",
-      error: err.message,
     });
   }
 };
@@ -399,11 +396,17 @@ export const deleteShippingAddress = async (req, res) => {
             deleted_shipping_address: result.rows[0]
         });
     } catch (err) {
+        if (err.code === FOREIGN_KEY_VIOLATION) {
+            return res.status(409).json({
+                success: false,
+                message: "This address is used by an order and can't be deleted",
+            });
+        }
+
         console.log("Error deleting shipping address:", err);
         res.status(500).json({
             success: false,
             message: "Failed to delete shipping address",
-            error: err.message,
         });
     }
 }

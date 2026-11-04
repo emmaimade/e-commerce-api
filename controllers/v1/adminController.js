@@ -8,6 +8,9 @@ import {
 import { refundOrder } from "../../utils/refunds.js";
 import { uploadMultipleToCloudinary, deleteFromCloudinary } from "../../utils/cloudinaryUpload.js";
 import { getNextDayString, isValidDateFormat} from "../../utils/dateHelpers.js";
+import { withTransaction } from "../../utils/transaction.js";
+import { HttpError } from "../../utils/httpError.js";
+import { FOREIGN_KEY_VIOLATION } from "../../utils/validators.js";
 import createTransporter from "../../utils/email.js";
 
 
@@ -22,7 +25,7 @@ export const adminGetUsers = async (req, res) => {
     );
     res.status(200).json({ users: users.rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 };
 
@@ -43,7 +46,7 @@ export const adminGetUser = async (req, res) => {
     }
     res.status(200).json({ user: user.rows[0] });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 };
 
@@ -153,13 +156,11 @@ export const addProduct = async (req, res) => {
     res.status(500).json({
         success: false,
         message: "Error adding product",
-        error: err.message
      });
   }
 };
 
 export const updateProduct = async (req, res) => {
-  const client = await db.connect();
   try {
     const productId = req.params.id;
     const updates = req.body;
@@ -183,8 +184,8 @@ export const updateProduct = async (req, res) => {
 
     // Filter only allowed fields
     for (const [key, value] of Object.entries(updates)) {
-      if (allowedFields.includes(key) && value.trim() && value !== undefined && value !== "") {
-        allowedUpdates[key] = value.trim();
+      if (allowedFields.includes(key) && value !== undefined && value !== null && String(value).trim() !== "") {
+        allowedUpdates[key] = String(value).trim();
       }
     }
 
@@ -392,9 +393,6 @@ export const updateProduct = async (req, res) => {
         updatedProduct.images = JSON.parse(updatedProduct.images);
       }
 
-      // Commit transaction
-      await client.query("COMMIT");
-
       res.status(200).json({
         success: true,
         message: "Product updated successfully",
@@ -402,9 +400,6 @@ export const updateProduct = async (req, res) => {
       });
     } catch (dbErr) {
       console.error("Database update failed", dbErr);
-
-      // Rollback transaction
-      await client.query("ROLLBACK");
 
       // If database update fails, clean up uploaded images
       if (uploadedPublicIds.length > 0) {
@@ -426,14 +421,10 @@ export const updateProduct = async (req, res) => {
     }
   } catch (err) {
     console.log("Error updating product", err);
-    await client.query("ROLLBACK");
     res.status(500).json({
       success: false,
       message: "Error updating product",
-      error: err.message,
     });
-  } finally {
-    client.release();
   }
 };
 
@@ -565,7 +556,6 @@ export const deleteProductImage = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to delete image",
-      error: err.message,
     });
   }
 };
@@ -619,11 +609,17 @@ export const deleteProduct = async (req, res) => {
       message: "Product deleted successfully",
     });
   } catch (err) {
+    if (err.code === FOREIGN_KEY_VIOLATION) {
+      return res.status(409).json({
+        success: false,
+        message: "This product is part of an order or cart and can't be deleted. Set its status to inactive instead.",
+      });
+    }
+
     console.log("Error deleting product", err);
     res.status(500).json({
       success: false,
       message: "Failed to delete product",
-      error: err.message
     });
   }
 };
@@ -716,7 +712,6 @@ export const getOrdersAdmin = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error getting orders",
-      error: err.message,
     });
   }
 };
@@ -776,13 +771,11 @@ export const getOrderAdmin = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error getting order",
-      error: err.message,
     });
   }
 };
 
-export const verifyPaymentAdmin = async (req, res) => {
-  const client = await db.connect();
+export const verifyPaymentAdmin = async (req, res, next) => {
   try {
     const { reference } = req.body;
 
@@ -795,7 +788,7 @@ export const verifyPaymentAdmin = async (req, res) => {
     }
 
     // Check if order exists
-    const existingOrder = await client.query(
+    const existingOrder = await db.query(
       "SELECT * FROM orders WHERE payment_ref = $1",
       [reference]
     );
@@ -825,9 +818,11 @@ export const verifyPaymentAdmin = async (req, res) => {
       });
     }
 
-    // Verify payment with paystack
+    // Verify payment with paystack before opening a transaction, so none is held open during HTTP
+    let verificationResponse;
+
     try {
-      const verificationResponse = await axios.get(
+      verificationResponse = await axios.get(
         `https://api.paystack.co/transaction/verify/${reference}`,
         {
           headers: {
@@ -837,40 +832,39 @@ export const verifyPaymentAdmin = async (req, res) => {
           timeout: 10000, // 10 seconds timeout
         }
       );
-
-      console.log(
-        "Admin Paystack verification response:",
-        verificationResponse.data
+    } catch (verificationError) {
+      console.error(
+        "Paystack verification error:",
+        verificationError.response?.data || verificationError.message
       );
+      throw new HttpError(500, "Payment verification failed");
+    }
 
-      if (!verificationResponse.data.status) {
-        console.error("Paystack verification failed:", verificationResponse.data);
+    console.log(
+      "Admin Paystack verification response:",
+      verificationResponse.data
+    );
 
-        return res.status(400).json({
-          success: false,
-          message: "Payment verification failed",
-          error:
-            verificationResponse.data.message || "Unknown verification error",
-        });
-      }
+    if (!verificationResponse.data.status) {
+      console.error("Paystack verification failed:", verificationResponse.data);
+      throw new HttpError(400, "Payment verification failed");
+    }
 
-      const data = verificationResponse.data.data;
+    const data = verificationResponse.data.data;
 
-      // abandoned/ongoing/pending: customer hasn't finished paying yet
-      if (!["success", "failed"].includes(data.status)) {
-        return res.status(200).json({
-          success: true,
-          message: "Payment has not been completed yet",
-          data: { payment_status: data.status },
-        });
-      }
+    // abandoned/ongoing/pending: customer hasn't finished paying yet
+    if (!["success", "failed"].includes(data.status)) {
+      return res.status(200).json({
+        success: true,
+        message: "Payment has not been completed yet",
+        data: { payment_status: data.status },
+      });
+    }
 
-      const paymentStatus = data.status === "success" ? "paid" : "failed";
-      const paymentMethod = data.channel;
+    const paymentStatus = data.status === "success" ? "paid" : "failed";
+    const paymentMethod = data.channel;
 
-      // Transaction starts after the Paystack call so it isn't held open during HTTP
-      await client.query("BEGIN");
-
+    const updatedOrder = await withTransaction(async (client) => {
       // update order status
       const updateQuery = `
       UPDATE orders
@@ -892,26 +886,24 @@ export const verifyPaymentAdmin = async (req, res) => {
       // Order was no longer pending (e.g. webhook processed it concurrently,
       // or it was cancelled/expired)
       if (result.rows.length === 0) {
-        await client.query("ROLLBACK");
-        return res.status(409).json({
-          success: false,
-          message: "Order is no longer awaiting payment",
-        });
+        throw new HttpError(409, "Order is no longer awaiting payment");
       }
+
+      const updatedOrder = result.rows[0];
 
       if (paymentStatus === "paid") {
         // Update product inventory in the same transaction as the order update
-        await updateProductInventory(result.rows[0].id, client);
+        await updateProductInventory(updatedOrder.id, client);
         console.log("Inventory updated successfully");
 
         // Log the payment transaction for audit trail
         await client.query(
           `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now()) ON CONFLICT (payment_reference, status) DO NOTHING`,
           [
-            result.rows[0].id,
+            updatedOrder.id,
             reference,
             paymentStatus,
-            result.rows[0].total,
+            updatedOrder.total,
             paymentMethod,
             "admin",
             JSON.stringify(data.gateway_response) || "Payment successful",
@@ -921,158 +913,8 @@ export const verifyPaymentAdmin = async (req, res) => {
         // Update order status history
         await client.query(
           `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
-          [result.rows[0].id, "processing", "Payment verified by admin, order is being processed"]
+          [updatedOrder.id, "processing", "Payment verified by admin, order is being processed"]
         );
-
-        // Commit before emailing so the customer is only notified of saved changes
-        await client.query("COMMIT");
-
-        // Send email to customer
-        try {
-          const customerQuery = await client.query(
-            "SELECT email, name FROM users WHERE id = $1",
-            [result.rows[0].user_id]
-          );
-          
-          if (customerQuery.rows.length > 0) {
-            const customer = customerQuery.rows[0];
-            const transporter = createTransporter();
-
-            const mailOptions = {
-              from: `E-commerce API <${process.env.EMAIL_USER}>`,
-              to: customer.email,
-              subject: "Payment Confirmed - Your Order is Being Processed",
-              html: `
-                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-                  <!-- Header -->
-                  <div style="text-align: center; border-bottom: 2px solid #28a745; padding-bottom: 20px; margin-bottom: 30px;">
-                    <h1 style="color: #333; margin: 0;">✅ Payment Confirmed!</h1>
-                    <p style="color: #666; margin: 5px 0;">Your order is now being processed</p>
-                  </div>
-
-                  <!-- Greeting -->
-                  <p style="font-size: 16px;">Hi ${
-                    customer.name || "Valued Customer"
-                  },</p>
-                  <p>Great news! Your payment for order <strong>#${
-                    result.rows[0].id
-                  }</strong> has been manually verified by our team. Your order is now being processed and will be prepared for shipment.</p>
-                  
-                  <!-- Success Banner -->
-                  <div style="background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; padding: 15px; border-radius: 8px; margin: 20px 0; text-align: center;">
-                    <strong>🎉 Payment Successfully Verified by Admin</strong>
-                  </div>
-
-                  <!-- Order Details Card -->
-                  <div style="background-color: #f8f9fa; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 4px solid #28a745;">
-                    <h3 style="margin-top: 0; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Payment & Order Details</h3>
-                    <table style="width: 100%; border-collapse: collapse;">
-                      <tr>
-                        <td style="padding: 10px 0; font-weight: bold; color: #555;">Order ID:</td>
-                        <td style="padding: 10px 0; color: #007bff; font-weight: bold;">#${
-                          result.rows[0].id
-                        }</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 10px 0; font-weight: bold; color: #555;">Order Status:</td>
-                        <td style="padding: 10px 0;">
-                          <span style="background-color: #ffc107; color: #000; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">
-                            PROCESSING
-                          </span>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 10px 0; font-weight: bold; color: #555;">Payment Reference:</td>
-                        <td style="padding: 10px 0; font-family: monospace; background-color: #e9ecef; padding: 5px 8px; border-radius: 4px;">${reference}</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 10px 0; font-weight: bold; color: #555;">Payment Method:</td>
-                        <td style="padding: 10px 0; text-transform: capitalize;">${paymentMethod}</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 10px 0; font-weight: bold; color: #555;">Amount Paid:</td>
-                        <td style="padding: 10px 0; font-size: 18px; color: #28a745; font-weight: bold;">
-                          ₦${result.rows[0].total.toLocaleString()}
-                        </td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 10px 0; font-weight: bold; color: #555;">Verified By:</td>
-                        <td style="padding: 10px 0; color: #dc3545; font-weight: bold;">Admin Team</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 10px 0; font-weight: bold; color: #555;">Verification Date:</td>
-                        <td style="padding: 10px 0;">${new Date().toLocaleDateString(
-                          "en-US",
-                          {
-                            year: "numeric",
-                            month: "long",
-                            day: "numeric",
-                            hour: "2-digit",
-                            minute: "2-digit",
-                          }
-                        )}</td>
-                      </tr>
-                    </table>
-                  </div>
-
-                  <!-- Next Steps -->
-                  <div style="background-color: #e8f4f8; padding: 20px; border-radius: 8px; margin: 25px 0;">
-                    <h3 style="margin-top: 0; color: #2c5aa0;">📦 What Happens Next?</h3>
-                    <ol style="padding-left: 20px; line-height: 1.6;">
-                      <li><strong>Order Processing</strong> - We're preparing your items for shipment</li>
-                      <li><strong>Quality Check</strong> - Each item is carefully inspected</li>
-                      <li><strong>Packaging</strong> - Your order will be securely packaged</li>
-                      <li><strong>Shipping</strong> - You'll receive tracking information via email</li>
-                      <li><strong>Delivery</strong> - Your order will arrive at your specified address</li>
-                    </ol>
-                    <p style="margin-bottom: 0; font-size: 14px; color: #666;">
-                      <strong>Estimated processing time:</strong> 1-2 business days
-                    </p>
-                  </div>
-
-                  <!-- Support Section -->
-                  <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 25px 0;">
-                    <h4 style="margin-top: 0; color: #333;">Need Help? 🤝</h4>
-                    <p style="margin-bottom: 10px;">Our customer support team is here to help:</p>
-                    <ul style="list-style: none; padding-left: 0;">
-                      <li style="margin: 8px 0;">📧 <strong>Email:</strong> ${
-                        process.env.EMAIL_USER
-                      }</li>
-                      <li style="margin: 8px 0;">📞 <strong>Phone:</strong> ${process.env.SUPPORT_PHONE || '+234-XXX-XXXX-XXX'}</li>
-                      <li style="margin: 8px 0;">💬 <strong>Live Chat:</strong> Available on our website</li>
-                    </ul>
-                    <p style="font-size: 14px; color: #666; margin-bottom: 0;">
-                      Please reference Order ID <strong>#${
-                        result.rows[0].id
-                      }</strong> when contacting support.
-                    </p>
-                  </div>
-
-                  <!-- Footer -->
-                  <div style="text-align: center; padding-top: 30px; border-top: 1px solid #ddd; margin-top: 40px;">
-                    <p style="font-size: 18px; margin-bottom: 10px;">Thank you for shopping with us! 🛍️</p>
-                    <p style="color: #666; margin-bottom: 20px;">
-                      Best regards,<br>
-                      <strong>The E-commerce API Team</strong>
-                    </p>
-                    
-                    <!-- Email Footer -->
-                    <div style="font-size: 12px; color: #999; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
-                      <p>This email was sent to <strong>${customer.email}</strong></p>
-                      <p>© 2024 E-commerce API. All rights reserved.</p>
-                      <p>If you have any concerns about this transaction, please contact us immediately.</p>
-                    </div>
-                  </div>
-                </div>
-              `,
-            };
-
-            await transporter.sendMail(mailOptions);
-            console.log("Payment Confirmation Email sent successfully");
-          }
-        } catch (emailError) {
-          console.error("Email sending failed:", emailError.message);
-        }
       } else {
         // Log the failed payment
         await client.query(
@@ -1080,7 +922,7 @@ export const verifyPaymentAdmin = async (req, res) => {
         VALUES ($1, $2, $3, $4, $5, now())
         ON CONFLICT (payment_reference, status) DO NOTHING`,
           [
-            result.rows[0].id,
+            updatedOrder.id,
             reference,
             paymentStatus,
             data.gateway_response || "Payment failed",
@@ -1091,51 +933,177 @@ export const verifyPaymentAdmin = async (req, res) => {
         // Update order status history
         await client.query(
           "INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)",
-          [result.rows[0].id, "failed", "Payment verification failed"]
+          [updatedOrder.id, "failed", "Payment verification failed"]
         );
-
-        await client.query("COMMIT");
       }
 
-      res.status(200).json({
-        success: true,
-        data: {
-          order: result.rows[0],
-          payment_status: paymentStatus,
-          payment_method: paymentMethod,
-          customer_id: result.rows[0].user_id,
-          verification_type: "manual",
-          verified_by: "admin",
-          verified_at: new Date().toISOString(),
-          admin_id: req.user.id,
-        },
-      });
-    } catch (verificationError) {
-      console.error(
-        "Paystack verification error:",
-        verificationError.response?.data || verificationError.message
-      );
-
-      await client.query("ROLLBACK");
-
-      return res.status(500).json({
-        success: false,
-        message: "Payment verification failed",
-        error:
-          verificationError.response?.data?.message ||
-          verificationError.message,
-      });
-    }
-  } catch (err) {
-    console.log("Verify payment error", err);
-    await client.query("ROLLBACK");
-    res.status(500).json({
-      success: false,
-      message: "Payment Verification failed",
-      error: err.message,
+      return updatedOrder;
     });
-  } finally {
-    client.release();
+
+    if (paymentStatus === "paid") {
+      // Send email to customer
+      try {
+        const customerQuery = await db.query(
+          "SELECT email, name FROM users WHERE id = $1",
+          [updatedOrder.user_id]
+        );
+        
+        if (customerQuery.rows.length > 0) {
+          const customer = customerQuery.rows[0];
+          const transporter = createTransporter();
+
+          const mailOptions = {
+            from: `E-commerce API <${process.env.EMAIL_USER}>`,
+            to: customer.email,
+            subject: "Payment Confirmed - Your Order is Being Processed",
+            html: `
+              <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                <!-- Header -->
+                <div style="text-align: center; border-bottom: 2px solid #28a745; padding-bottom: 20px; margin-bottom: 30px;">
+                  <h1 style="color: #333; margin: 0;">✅ Payment Confirmed!</h1>
+                  <p style="color: #666; margin: 5px 0;">Your order is now being processed</p>
+                </div>
+
+                <!-- Greeting -->
+                <p style="font-size: 16px;">Hi ${
+                  customer.name || "Valued Customer"
+                },</p>
+                <p>Great news! Your payment for order <strong>#${
+                  updatedOrder.id
+                }</strong> has been manually verified by our team. Your order is now being processed and will be prepared for shipment.</p>
+                
+                <!-- Success Banner -->
+                <div style="background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; padding: 15px; border-radius: 8px; margin: 20px 0; text-align: center;">
+                  <strong>🎉 Payment Successfully Verified by Admin</strong>
+                </div>
+
+                <!-- Order Details Card -->
+                <div style="background-color: #f8f9fa; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 4px solid #28a745;">
+                  <h3 style="margin-top: 0; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Payment & Order Details</h3>
+                  <table style="width: 100%; border-collapse: collapse;">
+                    <tr>
+                      <td style="padding: 10px 0; font-weight: bold; color: #555;">Order ID:</td>
+                      <td style="padding: 10px 0; color: #007bff; font-weight: bold;">#${
+                        updatedOrder.id
+                      }</td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 10px 0; font-weight: bold; color: #555;">Order Status:</td>
+                      <td style="padding: 10px 0;">
+                        <span style="background-color: #ffc107; color: #000; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">
+                          PROCESSING
+                        </span>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 10px 0; font-weight: bold; color: #555;">Payment Reference:</td>
+                      <td style="padding: 10px 0; font-family: monospace; background-color: #e9ecef; padding: 5px 8px; border-radius: 4px;">${reference}</td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 10px 0; font-weight: bold; color: #555;">Payment Method:</td>
+                      <td style="padding: 10px 0; text-transform: capitalize;">${paymentMethod}</td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 10px 0; font-weight: bold; color: #555;">Amount Paid:</td>
+                      <td style="padding: 10px 0; font-size: 18px; color: #28a745; font-weight: bold;">
+                        ₦${updatedOrder.total.toLocaleString()}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 10px 0; font-weight: bold; color: #555;">Verified By:</td>
+                      <td style="padding: 10px 0; color: #dc3545; font-weight: bold;">Admin Team</td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 10px 0; font-weight: bold; color: #555;">Verification Date:</td>
+                      <td style="padding: 10px 0;">${new Date().toLocaleDateString(
+                        "en-US",
+                        {
+                          year: "numeric",
+                          month: "long",
+                          day: "numeric",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        }
+                      )}</td>
+                    </tr>
+                  </table>
+                </div>
+
+                <!-- Next Steps -->
+                <div style="background-color: #e8f4f8; padding: 20px; border-radius: 8px; margin: 25px 0;">
+                  <h3 style="margin-top: 0; color: #2c5aa0;">📦 What Happens Next?</h3>
+                  <ol style="padding-left: 20px; line-height: 1.6;">
+                    <li><strong>Order Processing</strong> - We're preparing your items for shipment</li>
+                    <li><strong>Quality Check</strong> - Each item is carefully inspected</li>
+                    <li><strong>Packaging</strong> - Your order will be securely packaged</li>
+                    <li><strong>Shipping</strong> - You'll receive tracking information via email</li>
+                    <li><strong>Delivery</strong> - Your order will arrive at your specified address</li>
+                  </ol>
+                  <p style="margin-bottom: 0; font-size: 14px; color: #666;">
+                    <strong>Estimated processing time:</strong> 1-2 business days
+                  </p>
+                </div>
+
+                <!-- Support Section -->
+                <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 25px 0;">
+                  <h4 style="margin-top: 0; color: #333;">Need Help? 🤝</h4>
+                  <p style="margin-bottom: 10px;">Our customer support team is here to help:</p>
+                  <ul style="list-style: none; padding-left: 0;">
+                    <li style="margin: 8px 0;">📧 <strong>Email:</strong> ${
+                      process.env.EMAIL_USER
+                    }</li>
+                    <li style="margin: 8px 0;">📞 <strong>Phone:</strong> ${process.env.SUPPORT_PHONE || '+234-XXX-XXXX-XXX'}</li>
+                    <li style="margin: 8px 0;">💬 <strong>Live Chat:</strong> Available on our website</li>
+                  </ul>
+                  <p style="font-size: 14px; color: #666; margin-bottom: 0;">
+                    Please reference Order ID <strong>#${
+                      updatedOrder.id
+                    }</strong> when contacting support.
+                  </p>
+                </div>
+
+                <!-- Footer -->
+                <div style="text-align: center; padding-top: 30px; border-top: 1px solid #ddd; margin-top: 40px;">
+                  <p style="font-size: 18px; margin-bottom: 10px;">Thank you for shopping with us! 🛍️</p>
+                  <p style="color: #666; margin-bottom: 20px;">
+                    Best regards,<br>
+                    <strong>The E-commerce API Team</strong>
+                  </p>
+                  
+                  <!-- Email Footer -->
+                  <div style="font-size: 12px; color: #999; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
+                    <p>This email was sent to <strong>${customer.email}</strong></p>
+                    <p>© 2024 E-commerce API. All rights reserved.</p>
+                    <p>If you have any concerns about this transaction, please contact us immediately.</p>
+                  </div>
+                </div>
+              </div>
+            `,
+          };
+
+          await transporter.sendMail(mailOptions);
+          console.log("Payment Confirmation Email sent successfully");
+        }
+      } catch (emailError) {
+        console.error("Email sending failed:", emailError.message);
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        order: updatedOrder,
+        payment_status: paymentStatus,
+        payment_method: paymentMethod,
+        customer_id: updatedOrder.user_id,
+        verification_type: "manual",
+        verified_by: "admin",
+        verified_at: new Date().toISOString(),
+        admin_id: req.user.id,
+      },
+    });
+  } catch (err) {
+    next(err);
   }
 };
 
@@ -1149,93 +1117,61 @@ const ORDER_STATUS_TRANSITIONS = {
   cancelled: [],
 };
 
-export const updateOrderStatus = async (req, res) => {
-  const client = await db.connect();
-
+export const updateOrderStatus = async (req, res, next) => {
   try {
-    await client.query("BEGIN");
-
     const orderId = req.params.id;
     const { status, notes } = req.body;
 
-    // Input validation
-    if (!status) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        success: false,
-        message: "Order status is required",
-      });
-    }
-
-    // Validate status
-    const validStatuses = ["processing", "shipped", "delivered", "cancelled"];
-    if (!validStatuses.includes(status)) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        success: false,
-        message: `Invalid status. Valid statuses are: ${validStatuses.join(", ")}`,
-      });
-    }
-
-    // Get current user order with customer details
-    const currentOrderQuery = await client.query(
-      `SELECT 
-        o.*, 
-        u.email, u.name 
+    const { currentOrder, previousStatus, result } = await withTransaction(async (client) => {
+      // Get current user order with customer details
+      const currentOrderQuery = await client.query(
+        `SELECT
+        o.*,
+        u.email, u.name
       FROM orders o
       JOIN users u ON o.user_id = u.id
       WHERE o.id = $1
       FOR UPDATE OF o`,
-      [orderId]
-    );
+        [orderId]
+      );
 
-    if (currentOrderQuery.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({
-        success: false,
-        message: "Order not found"
-      });
-    }
+      if (currentOrderQuery.rows.length === 0) {
+        throw new HttpError(404, "Order not found");
+      }
 
-    const currentOrder = currentOrderQuery.rows[0];
-    const previousStatus = currentOrder.order_status;
+      const currentOrder = currentOrderQuery.rows[0];
+      const previousStatus = currentOrder.order_status;
 
-    // Check the order is allowed to move to this status
-    const allowedStatuses = ORDER_STATUS_TRANSITIONS[previousStatus] ?? [];
-    if (!allowedStatuses.includes(status)) {
-      await client.query("ROLLBACK");
-      return res.status(409).json({
-        success: false,
-        message: `Cannot change order status from ${previousStatus} to ${status}`,
-        allowed_statuses: allowedStatuses,
-      });
-    }
+      // Check the order is allowed to move to this status
+      const allowedStatuses = ORDER_STATUS_TRANSITIONS[previousStatus] ?? [];
+      if (!allowedStatuses.includes(status)) {
+        throw new HttpError(409, `Cannot change order status from ${previousStatus} to ${status}`, {
+          allowed_statuses: allowedStatuses,
+        });
+      }
 
-    // Check if order status has changed
-    const shouldSendEmail = previousStatus !== status;
-
-    const query = `
+      const query = `
       UPDATE orders
         SET order_status = $1, updated_at = NOW()
       WHERE id = $2
       RETURNING *
     `;
 
-    const result = await client.query(query, [status, orderId]);
+      const result = await client.query(query, [status, orderId]);
 
-    // Return held stock to inventory when an order is cancelled
-    if (status === "cancelled") {
-      await releaseOrderInventory(orderId, client);
-    }
+      // Return held stock to inventory when an order is cancelled
+      if (status === "cancelled") {
+        await releaseOrderInventory(orderId, client);
+      }
 
-    // Update Order Status History
-    await client.query(
-      "INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)",
-      [orderId, status, notes]
-    );
+      // Update Order Status History
+      await client.query(
+        "INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)",
+        [orderId, status, notes]
+      );
 
-    // Commit before emailing so the customer is only notified of saved changes
-    await client.query("COMMIT");
+      return { currentOrder, previousStatus, result };
+    });
 
     // Refund after committing so no lock is held during the Paystack call
     const refund =
@@ -1243,192 +1179,190 @@ export const updateOrderStatus = async (req, res) => {
         ? await refundOrder(currentOrder, "admin")
         : null;
 
-    // Send email notification if status changed
-    if (shouldSendEmail) {
-      try {
-        const transporter = createTransporter();
+    // Notify the customer. Commits first, so this only reports saved changes
+    try {
+      const transporter = createTransporter();
 
-        const statusMessages = {
-          processing: "Your order is being prepared for shipment.",
-          shipped: "Your order has been shipped and is on its way to you!",
-          delivered: "You order has been successfully delivered. We hope you love it!",
-          cancelled: "Your order has been cancelled. If you have questions, please contact our support team."
-        };
+      const statusMessages = {
+        processing: "Your order is being prepared for shipment.",
+        shipped: "Your order has been shipped and is on its way to you!",
+        delivered: "You order has been successfully delivered. We hope you love it!",
+        cancelled: "Your order has been cancelled. If you have questions, please contact our support team."
+      };
 
-        const statusColors = {
-          processing: "#ffc107",
-          shipped: "#17a2b8", 
-          delivered: "#28a745",
-          cancelled: "#dc3545"
-        };
+      const statusColors = {
+        processing: "#ffc107",
+        shipped: "#17a2b8", 
+        delivered: "#28a745",
+        cancelled: "#dc3545"
+      };
 
-        const statusEmojis = {
-          processing: "⚙️",
-          shipped: "🚚",
-          delivered: "✅",
-          cancelled: "❌"
-        };
+      const statusEmojis = {
+        processing: "⚙️",
+        shipped: "🚚",
+        delivered: "✅",
+        cancelled: "❌"
+      };
 
-        const mailOptions = {
-          from: `E-commerce API <${process.env.EMAIL_USER}>`,
-          to: currentOrder.email,
-          subject: `Order Update - ${status.charAt(0).toUpperCase() + status.slice(1)}`,
-          html: `
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-              <!-- Header -->
-              <div style="text-align: center; border-bottom: 2px solid ${statusColors[status] || '#007bff'}; padding-bottom: 20px; margin-bottom: 30px;">
-                <h1 style="color: #333; margin: 0;">${statusEmojis[status] || '📦'} Order Status Update</h1>
-                <p style="color: #666; margin: 5px 0;">Your order status has been updated</p>
-              </div>
+      const mailOptions = {
+        from: `E-commerce API <${process.env.EMAIL_USER}>`,
+        to: currentOrder.email,
+        subject: `Order Update - ${status.charAt(0).toUpperCase() + status.slice(1)}`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <!-- Header -->
+            <div style="text-align: center; border-bottom: 2px solid ${statusColors[status] || '#007bff'}; padding-bottom: 20px; margin-bottom: 30px;">
+              <h1 style="color: #333; margin: 0;">${statusEmojis[status] || '📦'} Order Status Update</h1>
+              <p style="color: #666; margin: 5px 0;">Your order status has been updated</p>
+            </div>
 
-              <!-- Greeting -->
-              <p style="font-size: 16px;">Hi ${currentOrder.name || "Valued Customer"},</p>
-              <p>We wanted to keep you updated on your order. The status has been updated from <strong>${previousStatus.toUpperCase()}</strong> to <strong>${status.toUpperCase()}</strong>.</p>
+            <!-- Greeting -->
+            <p style="font-size: 16px;">Hi ${currentOrder.name || "Valued Customer"},</p>
+            <p>We wanted to keep you updated on your order. The status has been updated from <strong>${previousStatus.toUpperCase()}</strong> to <strong>${status.toUpperCase()}</strong>.</p>
+            
+            <!-- Status Banner -->
+            <div style="background-color: ${statusColors[status] || '#007bff'}; color: white; padding: 15px; border-radius: 8px; margin: 20px 0; text-align: center;">
+              <h2 style="margin: 0; text-transform: uppercase;">${statusEmojis[status] || '📦'} ${status}</h2>
+            </div>
+
+            <!-- Order Details Card -->
+            <div style="background-color: #f8f9fa; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 4px solid ${statusColors[status] || '#007bff'};">
+              <h3 style="margin-top: 0; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Order Details</h3>
+              <table style="width: 100%; border-collapse: collapse;">
+                <tr>
+                  <td style="padding: 10px 0; font-weight: bold; color: #555;">Order ID:</td>
+                  <td style="padding: 10px 0; color: #007bff; font-weight: bold;">#${orderId}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px 0; font-weight: bold; color: #555;">Order Total:</td>
+                  <td style="padding: 10px 0; font-size: 16px; font-weight: bold;">₦${currentOrder.total.toLocaleString()}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px 0; font-weight: bold; color: #555;">Status:</td>
+                  <td style="padding: 10px 0;">
+                    <span style="background-color: ${statusColors[status] || '#007bff'}; color: white; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">
+                      ${status.toUpperCase()}
+                    </span>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px 0; font-weight: bold; color: #555;">Updated:</td>
+                  <td style="padding: 10px 0;">${new Date().toLocaleDateString("en-US", {
+                    year: "numeric",
+                    month: "long",
+                    day: "numeric", 
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px 0; font-weight: bold; color: #555;">Updated By:</td>
+                  <td style="padding: 10px 0; color: #dc3545; font-weight: bold;">Admin Team</td>
+                </tr>
+                ${notes ? `
+                <tr>
+                  <td style="padding: 10px 0; font-weight: bold; color: #555; vertical-align: top;">Notes:</td>
+                  <td style="padding: 10px 0; background-color: #fff3cd; padding: 8px 12px; border-radius: 4px; border-left: 3px solid #ffc107;">${notes}</td>
+                </tr>
+                ` : ''}
+              </table>
+            </div>
+
+            <!-- Status Message -->
+            <div style="background-color: #e8f4f8; padding: 20px; border-radius: 8px; margin: 25px 0;">
+              <p style="margin: 0; font-size: 16px; line-height: 1.6; text-align: center;">
+                ${statusMessages[status] || 'Your order status has been updated.'}
+              </p>
+            </div>
+
+            ${status === 'shipped' ? ` 
+            <!-- Shipping Info (if shipped) --> 
+            <div style="background-color: #d1ecf1; border: 1px solid #bee5eb; padding: 20px; border-radius: 8px; margin: 25px 0;"> 
+              <h4 style="margin-top: 0; color: #0c5460;">🚚 Shipping Information</h4> 
+              <p style="margin-bottom: 10px;">Your order is on its way! You can track your shipment using the tracking information that will be provided separately.</p> 
+              <p style="margin-bottom: 15px; font-size: 14px; color: #0c5460;"> 
+                <strong>Estimated delivery:</strong> 3-5 business days 
+              </p>
               
-              <!-- Status Banner -->
-              <div style="background-color: ${statusColors[status] || '#007bff'}; color: white; padding: 15px; border-radius: 8px; margin: 20px 0; text-align: center;">
-                <h2 style="margin: 0; text-transform: uppercase;">${statusEmojis[status] || '📦'} ${status}</h2>
+              <!-- Order History Button -->
+              <div style="text-align: center; margin-top: 20px;">
+                <a href="${process.env.BASE_URL}/v1/order/${orderId}/history" 
+                  style="display: inline-block; 
+                          background-color: #17a2b8; 
+                          color: white; 
+                          padding: 10px 20px; 
+                          text-decoration: none; 
+                          border-radius: 5px; 
+                          font-weight: bold; 
+                          transition: background-color 0.3s ease;
+                          border: none;
+                          cursor: pointer;"
+                  onmouseover="this.style.backgroundColor='#138496'" 
+                  onmouseout="this.style.backgroundColor='#17a2b8'">
+                  📋 View Order History
+                </a>
               </div>
+            </div> 
+            ` : ''}
 
-              <!-- Order Details Card -->
-              <div style="background-color: #f8f9fa; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 4px solid ${statusColors[status] || '#007bff'};">
-                <h3 style="margin-top: 0; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Order Details</h3>
-                <table style="width: 100%; border-collapse: collapse;">
-                  <tr>
-                    <td style="padding: 10px 0; font-weight: bold; color: #555;">Order ID:</td>
-                    <td style="padding: 10px 0; color: #007bff; font-weight: bold;">#${orderId}</td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 10px 0; font-weight: bold; color: #555;">Order Total:</td>
-                    <td style="padding: 10px 0; font-size: 16px; font-weight: bold;">₦${currentOrder.total.toLocaleString()}</td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 10px 0; font-weight: bold; color: #555;">Status:</td>
-                    <td style="padding: 10px 0;">
-                      <span style="background-color: ${statusColors[status] || '#007bff'}; color: white; padding: 4px 12px; border-radius: 15px; font-size: 12px; font-weight: bold;">
-                        ${status.toUpperCase()}
-                      </span>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 10px 0; font-weight: bold; color: #555;">Updated:</td>
-                    <td style="padding: 10px 0;">${new Date().toLocaleDateString("en-US", {
-                      year: "numeric",
-                      month: "long",
-                      day: "numeric", 
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}</td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 10px 0; font-weight: bold; color: #555;">Updated By:</td>
-                    <td style="padding: 10px 0; color: #dc3545; font-weight: bold;">Admin Team</td>
-                  </tr>
-                  ${notes ? `
-                  <tr>
-                    <td style="padding: 10px 0; font-weight: bold; color: #555; vertical-align: top;">Notes:</td>
-                    <td style="padding: 10px 0; background-color: #fff3cd; padding: 8px 12px; border-radius: 4px; border-left: 3px solid #ffc107;">${notes}</td>
-                  </tr>
-                  ` : ''}
-                </table>
-              </div>
-
-              <!-- Status Message -->
-              <div style="background-color: #e8f4f8; padding: 20px; border-radius: 8px; margin: 25px 0;">
-                <p style="margin: 0; font-size: 16px; line-height: 1.6; text-align: center;">
-                  ${statusMessages[status] || 'Your order status has been updated.'}
-                </p>
-              </div>
-
-              ${status === 'shipped' ? ` 
-              <!-- Shipping Info (if shipped) --> 
-              <div style="background-color: #d1ecf1; border: 1px solid #bee5eb; padding: 20px; border-radius: 8px; margin: 25px 0;"> 
-                <h4 style="margin-top: 0; color: #0c5460;">🚚 Shipping Information</h4> 
-                <p style="margin-bottom: 10px;">Your order is on its way! You can track your shipment using the tracking information that will be provided separately.</p> 
-                <p style="margin-bottom: 15px; font-size: 14px; color: #0c5460;"> 
-                  <strong>Estimated delivery:</strong> 3-5 business days 
-                </p>
-                
-                <!-- Order History Button -->
-                <div style="text-align: center; margin-top: 20px;">
-                  <a href="${process.env.BASE_URL}/v1/order/${orderId}/history" 
-                    style="display: inline-block; 
-                            background-color: #17a2b8; 
-                            color: white; 
-                            padding: 10px 20px; 
-                            text-decoration: none; 
-                            border-radius: 5px; 
-                            font-weight: bold; 
-                            transition: background-color 0.3s ease;
-                            border: none;
-                            cursor: pointer;"
-                    onmouseover="this.style.backgroundColor='#138496'" 
-                    onmouseout="this.style.backgroundColor='#17a2b8'">
-                    📋 View Order History
-                  </a>
-                </div>
-              </div> 
-              ` : ''}
-
-              ${status === 'delivered' ? `
-              <!-- Delivery Confirmation -->
-              <div style="background-color: #d4edda; border: 1px solid #c3e6cb; padding: 20px; border-radius: 8px; margin: 25px 0;">
-                <h4 style="margin-top: 0; color: #155724;">🎉 Delivery Confirmed!</h4>
-                <p style="margin-bottom: 15px;">We hope you're happy with your purchase! If you have a moment, we'd love to hear about your experience.</p>
-                <div style="text-align: center;">
-                  <a href="#" style="display: inline-block; background-color: #28a745; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold;">
-                    Leave a Review
-                  </a>
-                </div>
-              </div>
-              ` : ''}
-
-              ${status === 'cancelled' ? `
-              <!-- Cancellation Info -->
-              <div style="background-color: #f8d7da; border: 1px solid #f5c6cb; padding: 20px; border-radius: 8px; margin: 25px 0;">
-                <h4 style="margin-top: 0; color: #721c24;">Order Cancellation</h4>
-                <p style="margin-bottom: 10px;">If a payment was processed, the refund will be credited back to your original payment method within 5-7 business days.</p>
-                <p style="margin-bottom: 0;">If you have any questions about this cancellation, please don't hesitate to contact our support team.</p>
-              </div>
-              ` : ''}
-
-              <!-- Support Section -->
-              <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 25px 0;">
-                <h4 style="margin-top: 0; color: #333;">Need Help? 🤝</h4>
-                <p style="margin-bottom: 10px;">Questions about your order? We're here to help:</p>
-                <ul style="list-style: none; padding-left: 0;">
-                  <li style="margin: 8px 0;">📧 <strong>Email:</strong> ${process.env.EMAIL_USER}</li>
-                  <li style="margin: 8px 0;">📞 <strong>Phone:</strong> ${process.env.SUPPORT_PHONE || '+234-XXX-XXXX-XXX'}</li>
-                  <li style="margin: 8px 0;">💬 <strong>Live Chat:</strong> Available on our website</li>
-                </ul>
-                <p style="font-size: 14px; color: #666; margin-bottom: 0;">
-                  Please reference Order ID <strong>#${orderId}</strong> when contacting support.
-                </p>
-              </div>
-
-              <!-- Footer -->
-              <div style="text-align: center; padding-top: 30px; border-top: 1px solid #ddd; margin-top: 40px;">
-                <p style="font-size: 18px; margin-bottom: 10px;">Thank you for shopping with us! 🛍️</p>
-                <p style="color: #666; margin-bottom: 20px;">
-                  Best regards,<br>
-                  <strong>The E-commerce API Team</strong>
-                </p>
-                
-                <!-- Email Footer -->
-                <div style="font-size: 12px; color: #999; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
-                  <p>This email was sent to <strong>${currentOrder.email}</strong></p>
-                  <p>© 2024 E-commerce API. All rights reserved.</p>
-                </div>
+            ${status === 'delivered' ? `
+            <!-- Delivery Confirmation -->
+            <div style="background-color: #d4edda; border: 1px solid #c3e6cb; padding: 20px; border-radius: 8px; margin: 25px 0;">
+              <h4 style="margin-top: 0; color: #155724;">🎉 Delivery Confirmed!</h4>
+              <p style="margin-bottom: 15px;">We hope you're happy with your purchase! If you have a moment, we'd love to hear about your experience.</p>
+              <div style="text-align: center;">
+                <a href="#" style="display: inline-block; background-color: #28a745; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold;">
+                  Leave a Review
+                </a>
               </div>
             </div>
-          `,
-        };
+            ` : ''}
 
-        await transporter.sendMail(mailOptions);
-        console.log(`Order status update email sent for status: ${status}`);
-      } catch (emailError) {
-        console.error("Email sending failed:", emailError.message);
-      }
+            ${status === 'cancelled' ? `
+            <!-- Cancellation Info -->
+            <div style="background-color: #f8d7da; border: 1px solid #f5c6cb; padding: 20px; border-radius: 8px; margin: 25px 0;">
+              <h4 style="margin-top: 0; color: #721c24;">Order Cancellation</h4>
+              <p style="margin-bottom: 10px;">If a payment was processed, the refund will be credited back to your original payment method within 5-7 business days.</p>
+              <p style="margin-bottom: 0;">If you have any questions about this cancellation, please don't hesitate to contact our support team.</p>
+            </div>
+            ` : ''}
+
+            <!-- Support Section -->
+            <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 25px 0;">
+              <h4 style="margin-top: 0; color: #333;">Need Help? 🤝</h4>
+              <p style="margin-bottom: 10px;">Questions about your order? We're here to help:</p>
+              <ul style="list-style: none; padding-left: 0;">
+                <li style="margin: 8px 0;">📧 <strong>Email:</strong> ${process.env.EMAIL_USER}</li>
+                <li style="margin: 8px 0;">📞 <strong>Phone:</strong> ${process.env.SUPPORT_PHONE || '+234-XXX-XXXX-XXX'}</li>
+                <li style="margin: 8px 0;">💬 <strong>Live Chat:</strong> Available on our website</li>
+              </ul>
+              <p style="font-size: 14px; color: #666; margin-bottom: 0;">
+                Please reference Order ID <strong>#${orderId}</strong> when contacting support.
+              </p>
+            </div>
+
+            <!-- Footer -->
+            <div style="text-align: center; padding-top: 30px; border-top: 1px solid #ddd; margin-top: 40px;">
+              <p style="font-size: 18px; margin-bottom: 10px;">Thank you for shopping with us! 🛍️</p>
+              <p style="color: #666; margin-bottom: 20px;">
+                Best regards,<br>
+                <strong>The E-commerce API Team</strong>
+              </p>
+              
+              <!-- Email Footer -->
+              <div style="font-size: 12px; color: #999; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
+                <p>This email was sent to <strong>${currentOrder.email}</strong></p>
+                <p>© 2024 E-commerce API. All rights reserved.</p>
+              </div>
+            </div>
+          </div>
+        `,
+      };
+
+      await transporter.sendMail(mailOptions);
+      console.log(`Order status update email sent for status: ${status}`);
+    } catch (emailError) {
+      console.error("Email sending failed:", emailError.message);
     }
 
     res.status(200).json({
@@ -1436,7 +1370,7 @@ export const updateOrderStatus = async (req, res) => {
       message: "Order status updated successfully",
       data: {
         ...result.rows[0],
-        email_sent: shouldSendEmail,
+        email_sent: true,
         previous_status: previousStatus,
         refund: refund && {
           status: refund.processed ? refund.data.status : "failed",
@@ -1445,15 +1379,7 @@ export const updateOrderStatus = async (req, res) => {
       },
     });
   } catch (err) {
-    console.log("Error updating order status", err);
-    await client.query("ROLLBACK");
-    res.status(500).json({
-      success: false,
-      message: "Failed to update order status",
-      error: err.message,
-    });
-  } finally {
-    client.release();
+    next(err);
   }
 };
 
@@ -1536,10 +1462,6 @@ export const getPaymentStatusAdmin = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to get payment status",
-      error:
-        process.env.NODE_ENV === "development"
-          ? err.message
-          : "Internal server error",
     });
   }
 };
@@ -1772,16 +1694,12 @@ export const getPaymentLogs = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: "Failed to fetch payment logs",
-      error: err.message 
     });
   }
 };
 
 export const getPaymentAnalytics = async (req, res) => {
-  const client = await db.connect();
   try {
-    await client.query("BEGIN");
-
     const { period = '30d' } = req.query;
 
     let dateFilter = ''; 
@@ -1822,12 +1740,9 @@ export const getPaymentAnalytics = async (req, res) => {
     `;
 
     const [analyticsResult, methodResult] = await Promise.all([
-      client.query(analyticsQuery),
-      client.query(methodQuery)
+      db.query(analyticsQuery),
+      db.query(methodQuery)
     ]);
-
-    // Commit transaction
-    await client.query("COMMIT");
 
     res.status(200).json({
       success: true,
@@ -1839,14 +1754,9 @@ export const getPaymentAnalytics = async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching payment analytics:", err);
-
-    await client.query("ROLLBACK");
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: "Failed to fetch payment analytics",
-      error: err.message 
     });
-  } finally {
-    client.release();
   }
 }

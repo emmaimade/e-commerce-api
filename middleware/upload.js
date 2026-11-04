@@ -1,4 +1,5 @@
 import multer from "multer";
+import { HttpError } from "../utils/httpError.js";
 
 const storage = multer.memoryStorage();
 
@@ -7,7 +8,7 @@ const fileFilter = (req, file, cb) => {
     if (file.mimetype.startsWith("image/")) {
         cb(null, true);
     } else {
-        cb(new Error("File must be an image"), false);
+        cb(new HttpError(400, "File must be an image"), false);
     }
 }
 

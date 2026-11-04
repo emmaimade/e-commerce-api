@@ -58,7 +58,6 @@ export const register = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to register user",
-      error: err.message,
     });
   }
 };
@@ -103,7 +102,6 @@ export const login = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to log in",
-      error: err.message,
     });
   }
 };
@@ -179,7 +177,6 @@ export const forgotPassword = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to process forgot password request",
-      error: err.message,
     }); 
   }
 }
@@ -266,7 +263,6 @@ export const resetPassword = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to reset password",
-      error: err.message,
     });
   }
 }

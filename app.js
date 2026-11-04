@@ -13,11 +13,14 @@ import orderRoutes from './routes/v1/orderRoutes.js';
 import adminRoutes from './routes/v1/adminRoutes.js';
 import paymentRoutes from './routes/v1/paymentRoutes.js';
 import shippingRoutes from './routes/v1/shippingRoutes.js';
-import { handleUploadErrors } from './middleware/errorHandler.js';
+import { errorHandler } from './middleware/errorHandler.js';
 
 const app = express();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Proxies in front of the app, so req.ip (used for rate limiting) is the real client
+app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS) || 1);
 
 // Raw body parser for webhooks before express.json
 app.use('/v1/payments/webhook', express.raw({type: 'application/json'}));
@@ -93,8 +96,6 @@ app.use('/v1/shipping', shippingRoutes); // shipping addresses
 // admin routes
 app.use('/v1/admin', adminRoutes);
 
-// Multer Error handling
-app.use(handleUploadErrors);
 
 // Error handling for unmatched routes
 app.use((req, res) => {
@@ -104,5 +105,8 @@ app.use((req, res) => {
     statusCode: 404,
   });
 });
+
+// Error handling - must stay after all routes
+app.use(errorHandler);
 
 export default app;

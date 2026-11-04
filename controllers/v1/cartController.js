@@ -1,111 +1,77 @@
 import db from "../../config/db.js";
+import { HttpError } from "../../utils/httpError.js";
+import { withTransaction } from "../../utils/transaction.js";
 
-export const addToCart = async (req, res) => {
-  const client = await db.connect();
-
+export const addToCart = async (req, res, next) => {
   try {
     const userId = req.user.id;
     const { productId, quantity } = req.body;
 
-    // checks if quantity is a number
-    if (isNaN(quantity)) {
-      return res.status(400).json({
-        success: false,
-        message: "Quantity must be a number",
-      });
-    }
+    await withTransaction(async (client) => {
+      // checks if product exists
+      const product = await client.query("SELECT * from products WHERE id = $1", [
+        productId,
+      ]);
+      if (product.rows.length === 0) {
+        throw new HttpError(404, "Product not found");
+      }
 
-    // checks if quantity is greater than 0
-    if (quantity <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Quantity must be greater than 0",
-      });
-    }
+      // checks if quantity is less than inventory
+      if (product.rows[0].inventory_qty < quantity) {
+        throw new HttpError(400, "Quantity exceeds available inventory", {
+          available: product.rows[0].inventory_qty,
+        });
+      }
 
-    await client.query("BEGIN");
+      // checks if user has a cart already and if not create one
+      const cart = await client.query("SELECT id FROM carts WHERE user_id = $1", [
+        userId,
+      ]);
 
-    // checks if product exists
-    const product = await client.query("SELECT * from products WHERE id = $1", [
-      productId,
-    ]);
-    if (product.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({
-        success: false,
-        message: "Product not found",
-      });
-    }
+      let cartId;
 
-    // checks if quantity is less than inventory
-    if (product.rows[0].inventory_qty < quantity) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        success: false,
-        message: "Quantity exceeds available inventory",
-        available: product.rows[0].inventory_qty,
-      });
-    }
+      if (cart.rows.length === 0) {
+        const newCart = await client.query(
+          "INSERT INTO carts (user_id) VALUES ($1) RETURNING id",
+          [userId]
+        );
 
-    // checks if user has a cart already and if not create one
-    const cart = await client.query("SELECT id FROM carts WHERE user_id = $1", [
-      userId,
-    ]);
+        cartId = newCart.rows[0].id;
+      } else {
+        cartId = cart.rows[0].id;
+      }
 
-    let cartId;
-
-    if (cart.rows.length === 0) {
-      const newCart = await client.query(
-        "INSERT INTO carts (user_id) VALUES ($1) RETURNING id",
-        [userId]
+      // checks if product already exists in cart
+      const existingItem = await client.query(
+        "SELECT * FROM cart_items WHERE cart_id = $1 AND product_id = $2",
+        [cartId, productId]
       );
 
-      cartId = newCart.rows[0].id;
-    } else {
-      cartId = cart.rows[0].id;
-    }
+      if (existingItem.rows.length > 0) {
+        await client.query(
+          "UPDATE cart_items SET quantity = quantity + $1 WHERE id = $2",
+          [quantity, existingItem.rows[0].id]
+        );
+      } else {
+        // add product to cart_items
+        await client.query(
+          "INSERT INTO cart_items (cart_id, product_id, quantity) VALUES ($1, $2, $3)",
+          [cartId, productId, quantity]
+        );
+      }
 
-    // checks if product already exists in cart
-    const existingItem = await client.query(
-      "SELECT * FROM cart_items WHERE cart_id = $1 AND product_id = $2",
-      [cartId, productId]
-    );
-
-    if (existingItem.rows.length > 0) {
-      await client.query(
-        "UPDATE cart_items SET quantity = quantity + $1 WHERE id = $2",
-        [quantity, existingItem.rows[0].id]
-      );
-    } else {
-      // add product to cart_items
-      await client.query(
-        "INSERT INTO cart_items (cart_id, product_id, quantity) VALUES ($1, $2, $3)",
-        [cartId, productId, quantity]
-      );
-    }
-
-    // update timestamp
-    await client.query("UPDATE carts SET updated_at = NOW() WHERE id = $1", [
-      cartId,
-    ]);
-
-    // commit transaction
-    await client.query("COMMIT");
+      // update timestamp
+      await client.query("UPDATE carts SET updated_at = NOW() WHERE id = $1", [
+        cartId,
+      ]);
+    });
 
     res.status(200).json({
       success: true,
       message: "Product added to cart successfully",
     });
   } catch (err) {
-    await client.query("ROLLBACK");
-    console.log("Add to cart error:", err.message);
-    res.status(500).json({
-      success: false,
-      message: "Server Error",
-      error: err.message,
-    });
-  } finally {
-    client.release();
+    next(err);
   }
 };
 
@@ -186,30 +152,19 @@ export const getCart = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Server Error", 
-      error: err.message
     });
   }
 };
 
-export const updateItemQty = async (req, res) => {
-  const client = await db.connect();
-
+export const updateItemQty = async (req, res, next) => {
   try {
     const userId = req.user.id;
     const itemId = req.params.id;
-    const quantity = parseInt(req.body.quantity);
+    const { quantity } = req.body;
 
-    if (!quantity || quantity < 1 || quantity > 99) {
-      return res.status(400).json({
-        success: false,
-        error: "Quantity must be between 1 and 99",
-      });
-    }
-
-    await client.query("BEGIN");
-
-    // checks if item belongs to user cart
-    const query = `
+    const newItemTotal = await withTransaction(async (client) => {
+      // checks if item belongs to user cart
+      const query = `
             SELECT
             ci.id, ci.cart_id, p.inventory_qty, p.name, p.price
             FROM cart_items ci
@@ -218,41 +173,31 @@ export const updateItemQty = async (req, res) => {
             WHERE ci.id = $1 AND c.user_id = $2
         `;
 
-    const result = await client.query(query, [itemId, userId]);
+      const result = await client.query(query, [itemId, userId]);
 
-    if (result.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({
-        success: true,
-        error: "Cart item not found",
-      });
-    }
+      if (result.rows.length === 0) {
+        throw new HttpError(404, "Cart item not found");
+      }
 
-    const item = result.rows[0];
+      const item = result.rows[0];
 
-    // check product availability
-    if (quantity > item.inventory_qty) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        success: false,
-        error: `Only ${item.inventory_qty} items available in stock`,
-      });
-    }
+      // check product availability
+      if (quantity > item.inventory_qty) {
+        throw new HttpError(400, `Only ${item.inventory_qty} items available in stock`);
+      }
 
-    // update quantity
-    const updateQuery = `
+      // update quantity
+      const updateQuery = `
         UPDATE cart_items
         SET quantity = $1
         WHERE id = $2
         RETURNING *
     `;
-    await client.query(updateQuery, [quantity, itemId]);
+      await client.query(updateQuery, [quantity, itemId]);
 
-    // calculate new item total
-    const newItemTotal = quantity * parseFloat(item.price);
-
-    // commit transaction
-    await client.query("COMMIT");
+      // calculate new item total
+      return quantity * parseFloat(item.price);
+    });
 
     res.status(200).json({
       success: true,
@@ -264,15 +209,7 @@ export const updateItemQty = async (req, res) => {
       },
     });
   } catch (err) {
-    await client.query("ROLLBACK");
-    console.log("Error updating item quantity", err.message);
-    res.status(500).json({
-      success: false,
-      message: "Server Error",
-      error: err.message,
-    });
-  } finally {
-    client.release();
+    next(err);
   }
 };
 
@@ -340,39 +277,31 @@ export const deleteItem = async (req, res) => {
   }
 };
 
-export const clearCart = async (req, res) => {
-  const client = await db.connect();
-
+export const clearCart = async (req, res, next) => {
   try {
-    await client.query("BEGIN");
-
     const userId = req.user.id;
 
-    // Clear cart
-    const deleteResult = await client.query(
-      "DELETE FROM cart_items WHERE cart_id IN (SELECT id FROM carts WHERE user_id = $1)",
-      [userId]
-    );
+    const deletedCount = await withTransaction(async (client) => {
+      // Clear cart
+      const deleteResult = await client.query(
+        "DELETE FROM cart_items WHERE cart_id IN (SELECT id FROM carts WHERE user_id = $1)",
+        [userId]
+      );
 
-    const deletedCount = deleteResult.rowCount;
+      if (deleteResult.rowCount === 0) {
+        throw new HttpError(400, "Cart is already empty");
+      }
+
+      // Update cart timestamp
+      await client.query(
+        "UPDATE carts SET updated_at = NOW() WHERE user_id = $1",
+        [userId]
+      );
+
+      return deleteResult.rowCount;
+    });
+
     const item = deletedCount === 1 ? "item" : "items";
-
-    if (deletedCount === 0) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        success: false,
-        message: "Cart is already empty",
-      });
-    }
-
-    // Update cart timestamp
-    await client.query(
-      "UPDATE carts SET updated_at = NOW() WHERE user_id = $1",
-      [userId]
-    );
-
-    // Commit transaction
-    await client.query("COMMIT");
 
     res.status(200).json({
       success: true,
@@ -383,14 +312,6 @@ export const clearCart = async (req, res) => {
       }
     })
   } catch (err) {
-    console.error("Error clearing cart: ", err);
-    await client.query("ROLLBACK");
-    res.status(500).json({
-      success: false,
-      message: "Failed to clear cart",
-      error: err.message,
-    });
-  } finally {
-    client.release();
+    next(err);
   }
-}
+};

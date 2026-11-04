@@ -7,12 +7,26 @@ import {
   showResetPasswordForm,
 } from "../../controllers/v1/authController.js";
 
+import {
+  loginLimiter,
+  registerLimiter,
+  forgotPasswordLimiter,
+  resetPasswordLimiter,
+} from "../../middleware/rateLimit.js";
+import { validate } from "../../middleware/validate.js";
+import {
+  registerSchema,
+  loginSchema,
+  forgotPasswordSchema,
+  resetPasswordSchema,
+} from "../../utils/schemas.js";
+
 const router = express.Router();
 
-router.post("/register", register);
-router.post("/login", login);
-router.post("/forgot-password", forgotPassword);
+router.post("/register", registerLimiter, validate({ body: registerSchema }), register);
+router.post("/login", loginLimiter, validate({ body: loginSchema }), login);
+router.post("/forgot-password", forgotPasswordLimiter, validate({ body: forgotPasswordSchema }), forgotPassword);
 router.get("/reset-password/:token", showResetPasswordForm);
-router.post("/reset-password/:token", resetPassword);
+router.post("/reset-password/:token", resetPasswordLimiter, validate({ body: resetPasswordSchema }), resetPassword);
 
 export default router;

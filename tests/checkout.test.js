@@ -129,7 +129,7 @@ describe("POST /v1/order (checkout)", () => {
       .get("/v1/order")
       .set("Authorization", `Bearer ${user.token}`);
 
-    assert.equal(res.status, 404);
+    assert.equal(res.status, 200);
     assert.equal(leakedConnections(), 0);
     assert.equal(await openTransactions(), 0);
   });

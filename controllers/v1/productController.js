@@ -1,5 +1,4 @@
 import db from "../../config/db.js";
-import { isValidUuid } from "../../utils/validators.js";
 
 export const getProducts = async (req, res) => {
   try {
@@ -76,13 +75,6 @@ export const getProducts = async (req, res) => {
     queryParams.push(limit, offset);
     const result = await db.query(productsQuery, queryParams);
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "No products found",
-      });
-    }
-
     // Convert product images to array for response
     const products = result.rows.map((product) => {
       if (product.images && typeof product.images === "string") {
@@ -98,7 +90,7 @@ export const getProducts = async (req, res) => {
 
     // Set cache headers
     const cacheTime = search || min_price || max_price ? 60 : 300; // 1 min for filtered, 5 min for all
-    res.set("Cache-Control", `public, max-age=${cacheTime}`);
+    res.set("Cache-Control", `private, max-age=${cacheTime}`);
 
     res.status(200).json({
       success: true,
@@ -128,7 +120,6 @@ export const getProducts = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch products",
-      error: err.message,
     });
   }
 };
@@ -136,13 +127,6 @@ export const getProducts = async (req, res) => {
 export const getProduct = async (req, res) => {
   try {
     const productId = req.params.id;
-
-    if (!isValidUuid(productId)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid product ID",
-      });
-    }
 
     const result = await db.query("SELECT * FROM products WHERE id = $1", [
       productId,
@@ -161,7 +145,7 @@ export const getProduct = async (req, res) => {
     }
 
     // Set cache headers
-    res.set("Cache-Control", "public, max-age=1800"); // 30 min
+    res.set("Cache-Control", "private, max-age=60"); // Short, because this includes live stock
 
     res.status(200).json({
       success: true,
@@ -174,7 +158,6 @@ export const getProduct = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch product",
-      error: err.message,
     });
   }
 };

@@ -146,7 +146,6 @@ export const handleWebhook = async (req, res) => {
       });
     } catch (err) {
       console.error("Webhook processing error:", {
-        error: err.message,
         stack: err.stack,
         event: event,
         reference: reference,
@@ -179,12 +178,7 @@ const handleSuccessfulPayment = async (data) => {
     customer_email: customer?.email,
   });
 
-  const client = await db.connect();
-  let order;
-
-  try {
-    await client.query("BEGIN");
-
+  const order = await withTransaction(async (client) => {
     // Check if payment exist
     const existingPayment = await client.query(
       "SELECT id FROM payment_logs WHERE payment_reference = $1 AND status = 'paid'",
@@ -192,9 +186,8 @@ const handleSuccessfulPayment = async (data) => {
     );
 
     if (existingPayment.rows.length > 0) {
-      await client.query("ROLLBACK");
       console.log("Payment already processed");
-      return;
+      return null;
     }
 
     // Update order status unless it's already paid or was cancelled/expired
@@ -212,33 +205,32 @@ const handleSuccessfulPayment = async (data) => {
     const result = await client.query(updateQuery, [channel, reference]);
 
     if (result.rows.length === 0) {
-      await client.query("ROLLBACK");
       await logUnappliedPayment(reference);
-      return;
+      return null;
     }
 
-    order = result.rows[0];
+    const paidOrder = result.rows[0];
 
     console.log("Order updated:", {
-      order_id: order.id,
-      user_id: order.user_id,
+      order_id: paidOrder.id,
+      user_id: paidOrder.user_id,
       previous_status: "pending",
-      new_status: order.status,
+      new_status: paidOrder.status,
     });
 
     // Update Product Inventory
-    await updateProductInventory(order.id, client);
+    await updateProductInventory(paidOrder.id, client);
 
     // Only clear cart if order was actually updated (was pending)
     // This prevents clearing cart if user already verified payment
     const cartClearResult = await client.query(
       `DELETE FROM cart_items WHERE cart_id IN (SELECT id FROM carts WHERE user_id = $1)`,
-      [order.user_id]
+      [paidOrder.user_id]
     );
 
     if (cartClearResult.rowCount > 0) {
       console.log(
-        `Cleared ${cartClearResult.rowCount} items from cart for user ${order.user_id}`
+        `Cleared ${cartClearResult.rowCount} items from cart for user ${paidOrder.user_id}`
       );
     } else {
       console.log("Cart was already empty or cleared");
@@ -249,7 +241,7 @@ const handleSuccessfulPayment = async (data) => {
       `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
       ON CONFLICT (payment_reference, status) DO NOTHING`,
       [
-        order.id,
+        paidOrder.id,
         reference,
         "paid",
         amount / 100, // Convert from kobo to naira
@@ -262,20 +254,13 @@ const handleSuccessfulPayment = async (data) => {
     // Update order status history
     await client.query(
       `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
-      [order.id, "processing", "Payment verified, order is being processed"]
+      [paidOrder.id, "processing", "Payment verified, order is being processed"]
     );
 
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    console.error("Error processing successful payment:", {
-      error: err.message,
-      stack: err.stack,
-    });
-    throw err;
-  } finally {
-    client.release();
-  }
+    return paidOrder;
+  });
+
+  if (!order) return;
 
   // Create transporter
   const transporter = createTransporter();
@@ -437,17 +422,15 @@ const handleSuccessfulPayment = async (data) => {
 
 // Failed payment handler
 const handleFailedPayment = async (data) => {
-  const client = await db.connect();
+  const { reference, gateway_response, customer } = data;
 
-  try {
-    const { reference, gateway_response, customer } = data;
+  console.log(" ❌ Processing failed payment:", {
+    reference,
+    reason: gateway_response,
+    customer_email: customer?.email,
+  });
 
-    console.log(" ❌ Processing failed payment:", {
-      reference,
-      reason: gateway_response,
-      customer_email: customer?.email,
-    });
-
+  await withTransaction(async (client) => {
     // Update order status to failed only if it's still pending
     const updateQuery = `
             UPDATE orders
@@ -458,45 +441,33 @@ const handleFailedPayment = async (data) => {
             RETURNING *
         `;
 
-    await client.query("BEGIN");
-
     const result = await client.query(updateQuery, [reference]);
 
-    if (result.rows.length > 0) {
-      const order = result.rows[0];
-      console.log(`Order ${order.id} marked as failed`);
-
-      // Log the failed payment
-      await client.query(
-        `INSERT INTO payment_logs (order_id, payment_reference, status, failure_reason, processed_by, created_at)
-        VALUES ($1, $2, $3, $4, $5, now())
-        ON CONFLICT (payment_reference, status) DO NOTHING`,
-        [order.id, reference, "failed", gateway_response, "webhook"]
-      );
-
-      // Update order status history
-      await client.query(
-        `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
-        [order.id, "failed", `Payment verification failed`]
-      );
-    } else {
+    if (result.rows.length === 0) {
       console.log(
         "No pending order found for failed payment reference:",
         reference
       );
+      return;
     }
 
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    console.error("Error processing failed payment:", {
-      error: err.message,
-      stack: err.stack,
-    });
-    throw err;
-  } finally {
-    client.release();
-  }
+    const order = result.rows[0];
+    console.log(`Order ${order.id} marked as failed`);
+
+    // Log the failed payment
+    await client.query(
+      `INSERT INTO payment_logs (order_id, payment_reference, status, failure_reason, processed_by, created_at)
+      VALUES ($1, $2, $3, $4, $5, now())
+      ON CONFLICT (payment_reference, status) DO NOTHING`,
+      [order.id, reference, "failed", gateway_response, "webhook"]
+    );
+
+    // Update order status history
+    await client.query(
+      `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
+      [order.id, "failed", `Payment verification failed`]
+    );
+  });
 };
 
 // A successful charge that couldn't be applied to a pending order. If the order
@@ -870,12 +841,8 @@ export const getPaymentStatus = async (req, res) => {
 
     const logsResult = await db.query(logsQuery, [reference]);
 
-    // Set cache control headers
-    if (orderData.status === "paid") {
-      res.set("Cache-Control", "public, max-age=3600"); // 1 hour
-    } else {
-      res.set("Cache-Control", "no-cache"); // Pending orders should not be cached
-    }
+    // Payment details are private and change as webhooks arrive
+    res.set("Cache-Control", "private, no-store");
 
     res.status(200).json({
       success: true,
@@ -961,7 +928,6 @@ export const testWebhook = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Test webhook failed",
-      error: err.message,
     });
   }
 };

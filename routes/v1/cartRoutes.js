@@ -8,11 +8,16 @@ import {
 } from "../../controllers/v1/cartController.js";
 import { auth } from "../../middleware/auth.js";
 
+import { validate, validateUuidParam } from "../../middleware/validate.js";
+import { addToCartSchema, updateCartItemSchema } from "../../utils/schemas.js";
+
 const router = express.Router();
 
-router.post("/", auth, addToCart);
+router.param("id", validateUuidParam);
+
+router.post("/", auth, validate({ body: addToCartSchema }), addToCart);
 router.get("/", auth, getCart);
-router.patch("/:id", auth, updateItemQty);
+router.patch("/:id", auth, validate({ body: updateCartItemSchema }), updateItemQty);
 router.delete("/:id", auth, deleteItem);
 router.delete("/", auth, clearCart);
 
