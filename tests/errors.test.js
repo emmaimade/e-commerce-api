@@ -283,8 +283,17 @@ describe("error handling and validation", () => {
     assert.match(status.headers["cache-control"], /no-store/);
   });
 
-  it("keeps manual transactions out of controllers", () => {
+  it("keeps data access and external calls out of controllers", () => {
     const dir = new URL("../controllers/v1/", import.meta.url);
+
+    for (const file of fs.readdirSync(dir)) {
+      const source = fs.readFileSync(new URL(file, dir), "utf8");
+      assert.doesNotMatch(source, /config\/db\.js|from "axios"|withTransaction/, `${file}: move this to a service`);
+    }
+  });
+
+  it("keeps manual transactions out of services", () => {
+    const dir = new URL("../services/", import.meta.url);
 
     for (const file of fs.readdirSync(dir)) {
       const source = fs.readFileSync(new URL(file, dir), "utf8");

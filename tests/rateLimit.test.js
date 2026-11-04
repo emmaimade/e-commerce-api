@@ -18,7 +18,7 @@ describe("rate limiting", () => {
     const attempt = () => post("/v1/auth/login", { email: "nobody@test.com", password: "wrong" });
 
     for (let i = 0; i < 10; i++) {
-      assert.equal((await attempt()).status, 404);
+      assert.equal((await attempt()).status, 401);
     }
     const blocked = await attempt();
 
@@ -32,7 +32,7 @@ describe("rate limiting", () => {
     const attempt = () => post("/v1/auth/forgot-password", { email: "nobody@test.com" });
 
     for (let i = 0; i < 5; i++) {
-      assert.equal((await attempt()).status, 404);
+      assert.equal((await attempt()).status, 200);
     }
 
     assert.equal((await attempt()).status, 429);

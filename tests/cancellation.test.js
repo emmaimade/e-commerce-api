@@ -3,7 +3,7 @@ import { describe, it, before, beforeEach, afterEach, after } from "node:test";
 import assert from "node:assert/strict";
 import request from "supertest";
 import app from "../app.js";
-import { expireUnpaidOrders } from "../utils/orderExpiry.js";
+import { expireUnpaidOrders } from "../services/orderExpiryService.js";
 import {
   db, resetDatabase, clearTables, closeDatabase, createUser, createAddress,
   createProduct, addToCart, getStock, getOrder, countRows,

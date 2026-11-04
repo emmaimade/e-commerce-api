@@ -5,7 +5,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import request from "supertest";
 import app from "../app.js";
 import cloudinary from "../config/cloudinary.js";
-import { reserveOrderInventory } from "../utils/inventory.js";
+import { reserveOrderInventory } from "../services/inventoryService.js";
 import {
   db, resetDatabase, clearTables, closeDatabase, createUser, createAddress,
   createProduct, addToCart, getStock, countRows,
@@ -245,6 +245,14 @@ describe("admin orders and payments", () => {
     assert.equal(logs.status, 200);
     assert.equal(JSON.stringify(logs.body).includes(reference), true);
     assert.equal(analytics.status, 200);
+  });
+
+  it("clears the customer's cart when a payment is verified manually", async () => {
+    mockPaystackVerify({ status: "success", channel: "card", gateway_response: "Approved" });
+
+    await as("post", "/orders/payment/verify").send({ reference });
+
+    assert.equal(await countRows("cart_items"), 0);
   });
 
   it("leaves the order pending while the customer is still paying", async () => {

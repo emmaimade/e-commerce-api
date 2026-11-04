@@ -1,6 +1,6 @@
 import db from "../config/db.js";
-import { releaseOrderInventory } from "./inventory.js";
-import { withTransaction } from "./transaction.js";
+import { releaseOrderInventory } from "./inventoryService.js";
+import { withTransaction } from "../utils/transaction.js";
 
 // Matches the payment window promised in the order confirmation email
 const PAYMENT_WINDOW_HOURS = 24;

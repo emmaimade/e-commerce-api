@@ -521,15 +521,35 @@ paths:
                   - $ref: '#/components/schemas/ApiResponse'
                   - type: object
                     properties:
-                      data:
-                        type: object
-                        properties:
-                          user:
-                            $ref: '#/components/schemas/User'
-                          token:
-                            type: string
+                      token:
+                        type: string
         '401':
-          description: Invalid credentials
+          description: Invalid credentials. The answer is the same for an unknown email and a wrong password.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many failed attempts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      summary: Log out on all devices
+      description: Revokes every token issued to the user
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '401':
+          description: Missing or revoked token
           content:
             application/json:
               schema:
@@ -557,7 +577,7 @@ paths:
                   example: "john.doe@example.com"
       responses:
         '200':
-          description: Password reset email sent successfully
+          description: Request accepted. The answer is the same whether or not the account exists.
           content:
             application/json:
               schema:
@@ -567,15 +587,15 @@ paths:
                     properties:
                       message:
                         type: string
-                        example: "Password reset email sent successfully"
+                        example: "If an account exists for that email, a reset link has been sent"
         '400':
           description: Email is required
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        '404':
-          description: User with this email does not exist
+        '429':
+          description: Too many requests
           content:
             application/json:
               schema:

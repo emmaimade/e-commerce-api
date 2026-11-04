@@ -1,4 +1,4 @@
-      const statusMessages = {
+const statusMessages = {
   processing: "Your order is being prepared for shipment.",
   shipped: "Your order has been shipped and is on its way to you!",
   delivered: "You order has been successfully delivered. We hope you love it!",

@@ -149,6 +149,28 @@ describe("POST /v1/order (checkout)", () => {
     assert.equal(await getStock(productId), 5);
   });
 
+  it("shows the customer their order and its history", async () => {
+    mockPaystackInit();
+    const user = await createUser();
+    const stranger = await createUser();
+    const addressId = await createAddress(user.id);
+    await addToCart(user.id, await createProduct(), 1);
+    const orderId = (await checkout(user, addressId)).body.data.order_id;
+    const get = (path, as = user) =>
+      request(app).get(path).set("Authorization", `Bearer ${as.token}`);
+
+    const order = await get(`/v1/order/${orderId}`);
+    const history = await get(`/v1/order/${orderId}/history`);
+    const foreign = await get(`/v1/order/${orderId}/history`, stranger);
+
+    assert.equal(order.status, 200);
+    assert.equal(order.body.data.items.length, 1);
+    assert.equal(history.status, 200);
+    assert.equal(history.body.data[0].status, "pending");
+    assert.ok(history.body.data[0].created_at);
+    assert.equal(foreign.status, 404);
+  });
+
   it("rejects a shipping address that belongs to another user", async () => {
     mockPaystackInit();
     const user = await createUser();

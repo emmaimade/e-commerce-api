@@ -11,7 +11,8 @@ CREATE TABLE users (
 	password TEXT NOT NULL,
 	role TEXT NOT NULL DEFAULT 'customer',
 	reset_password_token VARCHAR(255),
-	reset_token_expiry TIMESTAMP,
+	reset_token_expiry TIMESTAMPTZ,
+	token_version INTEGER NOT NULL DEFAULT 0, -- raised to revoke all of a user's tokens
 	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

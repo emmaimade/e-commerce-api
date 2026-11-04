@@ -2,7 +2,7 @@ import "./helpers/setup.js";
 import { describe, it, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
-import { reserveOrderInventory, releaseOrderInventory } from "../utils/inventory.js";
+import { reserveOrderInventory, releaseOrderInventory } from "../services/inventoryService.js";
 import {
   db, resetDatabase, clearTables, closeDatabase, createUser, createProduct, getStock,
 } from "./helpers/db.js";

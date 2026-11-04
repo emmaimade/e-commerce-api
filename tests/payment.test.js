@@ -124,6 +124,18 @@ describe("Paystack webhook", () => {
     assert.equal((await getOrder(orderId)).inventory_reserved, true);
   });
 
+  it("records a payment that arrives without a gateway message", async () => {
+    const { user, orderId, reference } = await placeOrder();
+    const payload = chargeSuccess(reference, user.email);
+    delete payload.data.gateway_response;
+
+    const res = await sendWebhook(payload);
+
+    assert.equal(res.status, 200);
+    assert.equal((await getOrder(orderId)).status, "paid");
+    assert.equal(await countRows("payment_logs", "order_id = $1", [orderId]), 1);
+  });
+
   it("marks the order failed on charge.failed and keeps stock reserved", async () => {
     const { user, productId, orderId, reference } = await placeOrder();
 

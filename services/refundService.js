@@ -1,5 +1,5 @@
-import axios from "axios";
-import { withTransaction } from "./transaction.js";
+import { withTransaction } from "../utils/transaction.js";
+import { createRefund } from "./paystackService.js";
 
 // Save a refund Paystack didn't accept, so an admin can find it with
 // GET /v1/admin/payments/logs?status=refund_failed and refund it manually
@@ -25,24 +25,9 @@ export const refundOrder = async (order, processedBy) => {
   let reason;
 
   try {
-    const response = await axios.post(
-      "https://api.paystack.co/refund",
-      {
-        transaction: order.payment_ref,
-        amount: order.total * 100, // Convert to kobo
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-          "Content-Type": "application/json",
-        },
-        timeout: 30000, // 30 seconds timeout
-      }
-    );
-    const result = response.data;
+    const result = await createRefund(order.payment_ref, order.total * 100);
 
     if (result.status && ["pending", "processed"].includes(result.data.status)) {
-      console.log("Refund initiated successfully:", result.data);
       return { processed: true, data: result.data };
     }
 
@@ -54,7 +39,6 @@ export const refundOrder = async (order, processedBy) => {
       errorData?.code === "transaction_reversed" &&
       errorData?.message === "Transaction has been fully reversed"
     ) {
-      console.log("Transaction already fully reversed: ", errorData);
       return {
         processed: true,
         data: { status: "already_processed", message: errorData.message },

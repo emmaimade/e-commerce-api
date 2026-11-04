@@ -1,324 +1,70 @@
-import db from "../../config/db.js";
-import { HttpError } from "../../utils/httpError.js";
-import { withTransaction } from "../../utils/transaction.js";
+import * as cartService from "../../services/cartService.js";
 
-export const addToCart = async (req, res, next) => {
-  try {
-    const userId = req.user.id;
-    const { productId, quantity } = req.body;
+export const addToCart = async (req, res) => {
+  await cartService.addItem(req.user.id, req.body);
 
-    await withTransaction(async (client) => {
-      // checks if product exists
-      const product = await client.query("SELECT * from products WHERE id = $1", [
-        productId,
-      ]);
-      if (product.rows.length === 0) {
-        throw new HttpError(404, "Product not found");
-      }
-
-      if (product.rows[0].status !== "active") {
-        throw new HttpError(400, "This product is not available");
-      }
-
-      // checks if user has a cart already and if not create one
-      const cart = await client.query("SELECT id FROM carts WHERE user_id = $1", [
-        userId,
-      ]);
-
-      let cartId;
-
-      if (cart.rows.length === 0) {
-        const newCart = await client.query(
-          "INSERT INTO carts (user_id) VALUES ($1) RETURNING id",
-          [userId]
-        );
-
-        cartId = newCart.rows[0].id;
-      } else {
-        cartId = cart.rows[0].id;
-      }
-
-      // checks if product already exists in cart
-      const existingItem = await client.query(
-        "SELECT * FROM cart_items WHERE cart_id = $1 AND product_id = $2",
-        [cartId, productId]
-      );
-
-      // checks the cart total, including any already in the cart, against inventory
-      const quantityInCart = existingItem.rows[0]?.quantity ?? 0;
-
-      if (quantityInCart + quantity > product.rows[0].inventory_qty) {
-        throw new HttpError(400, "Quantity exceeds available inventory", {
-          available: product.rows[0].inventory_qty,
-          in_cart: quantityInCart,
-        });
-      }
-
-      if (existingItem.rows.length > 0) {
-        await client.query(
-          "UPDATE cart_items SET quantity = quantity + $1 WHERE id = $2",
-          [quantity, existingItem.rows[0].id]
-        );
-      } else {
-        // add product to cart_items
-        await client.query(
-          "INSERT INTO cart_items (cart_id, product_id, quantity) VALUES ($1, $2, $3)",
-          [cartId, productId, quantity]
-        );
-      }
-
-      // update timestamp
-      await client.query("UPDATE carts SET updated_at = NOW() WHERE id = $1", [
-        cartId,
-      ]);
-    });
-
-    res.status(200).json({
-      success: true,
-      message: "Product added to cart successfully",
-    });
-  } catch (err) {
-    next(err);
-  }
+  res.status(200).json({
+    success: true,
+    message: "Product added to cart successfully",
+  });
 };
 
 export const getCart = async (req, res) => {
-  try {
-    const userId = req.user.id;
+  const cart = await cartService.getCart(req.user.id);
 
-    const query = `
-        SELECT 
-        c.id as cart_id, 
-        c.created_at as cart_created_at, 
-        c.updated_at as cart_updated_at, 
-        ci.id as item_id, 
-        ci.quantity, 
-        ci.added_at, 
-        p.id as product_id, 
-        p.name, 
-        p.price, 
-        p.images, 
-        (ci.quantity * p.price) as item_total 
-        FROM carts c 
-        LEFT JOIN cart_items ci ON c.id = ci.cart_id 
-        LEFT JOIN products p ON ci.product_id = p.id 
-        WHERE c.user_id = $1 
-        ORDER BY ci.added_at DESC
-    `;
-
-    const result = await db.query(query, [userId]);
-
-    if (result.rows.length === 0) {
-      // User has no cart yet
-      return res.json({
-        success: true,
-        data: {
-          cart_id: null,
-          items: [],
-          total_items: 0,
-          total_amount: 0,
-        },
-      });
-    }
-
-    const hasItems = result.rows[0].item_id !== null;
-
-    const cart = {
-      cart_id: result.rows[0].cart_id,
-      created_at: result.rows[0].cart_created_at,
-      updated_at: result.rows[0].cart_updated_at,
-      items: [],
-      total_items: 0,
-      total_amount: 0,
-    };
-
-    if (hasItems) {
-      result.rows.forEach((item) => {
-        cart.items.push({
-          item_id: item.item_id,
-          product_id: item.product_id,
-          product_name: item.name,
-          product_price: parseFloat(item.price),
-          product_images: item.images,
-          quantity: parseInt(item.quantity),
-          item_total: parseFloat(item.item_total),
-          added_at: item.added_at,
-        });
-
-        cart.total_items += parseInt(item.quantity);
-        cart.total_amount += parseFloat(item.item_total);
-      });
-    }
-
-    res.json({
-      success: true,
-      data: cart,
-    });
-  } catch (err) {
-    console.log("Get cart error:", err.message);
-    res.status(500).json({
-      success: false,
-      message: "Server Error", 
-    });
-  }
+  res.json({
+    success: true,
+    data: cart,
+  });
 };
 
-export const updateItemQty = async (req, res, next) => {
-  try {
-    const userId = req.user.id;
-    const itemId = req.params.id;
-    const { quantity } = req.body;
+export const updateItemQty = async (req, res) => {
+  const itemId = req.params.id;
+  const { quantity } = req.body;
 
-    const newItemTotal = await withTransaction(async (client) => {
-      // checks if item belongs to user cart
-      const query = `
-            SELECT
-            ci.id, ci.cart_id, p.inventory_qty, p.name, p.price
-            FROM cart_items ci
-            JOIN carts c ON ci.cart_id = c.id
-            JOIN products p ON ci.product_id = p.id
-            WHERE ci.id = $1 AND c.user_id = $2
-        `;
+  const itemTotal = await cartService.updateItemQuantity(req.user.id, itemId, quantity);
 
-      const result = await client.query(query, [itemId, userId]);
-
-      if (result.rows.length === 0) {
-        throw new HttpError(404, "Cart item not found");
-      }
-
-      const item = result.rows[0];
-
-      // check product availability
-      if (quantity > item.inventory_qty) {
-        throw new HttpError(400, `Only ${item.inventory_qty} items available in stock`);
-      }
-
-      // update quantity
-      const updateQuery = `
-        UPDATE cart_items
-        SET quantity = $1
-        WHERE id = $2
-        RETURNING *
-    `;
-      await client.query(updateQuery, [quantity, itemId]);
-
-      // calculate new item total
-      return quantity * parseFloat(item.price);
-    });
-
-    res.status(200).json({
-      success: true,
-      message: "Cart updated successfully",
-      data: {
-        item_id: itemId,
-        quantity: quantity,
-        item_total: newItemTotal,
-      },
-    });
-  } catch (err) {
-    next(err);
-  }
+  res.status(200).json({
+    success: true,
+    message: "Cart updated successfully",
+    data: {
+      item_id: itemId,
+      quantity,
+      item_total: itemTotal,
+    },
+  });
 };
 
 export const deleteItem = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const itemId = req.params.id;
+  const itemId = req.params.id;
 
-    // check if items exist and belong to user's cart
-    const checkQuery = `
-            SELECT
-            ci.id, ci.cart_id, ci.quantity, p.name, p.price
-            FROM cart_items ci
-            JOIN carts c ON ci.cart_id = c.id
-            JOIN products p ON ci.product_id = p.id
-            WHERE ci.id = $1 AND c.user_id = $2
-        `;
+  const { item, cartEmpty } = await cartService.removeItem(req.user.id, itemId);
 
-    const checkResult = await db.query(checkQuery, [itemId, userId]);
-    if (checkResult.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "Cart item not found or unauthorized",
-      });
-    }
-
-    const item = checkResult.rows[0];
-
-    // delete item
-    await db.query("DELETE FROM cart_items WHERE id = $1", [itemId]);
-
-    // update cart timestamp
-    await db.query("UPDATE carts SET updated_at = NOW() WHERE id = $1", [
-      item.cart_id,
-    ]);
-
-    // check if cart is now empty
-    const remainingItemsResult = await db.query(
-      "SELECT COUNT(*) as count FROM cart_items WHERE cart_id = $1",
-      [item.cart_id]
-    );
-
-    const isCartEmpty = parseInt(remainingItemsResult.rows[0].count) === 0;
-
-    res.status(200).json({
-      success: true,
-      message: `${item.name} removed from cart`,
-      data: {
-        deleted_item_id: itemId,
-        cart_id: item.cart_id,
-        cart_empty: isCartEmpty,
-        deleted_item: {
-          name: item.name,
-          price: item.price,
-          quantity: item.quantity,
-        },
+  res.status(200).json({
+    success: true,
+    message: `${item.name} removed from cart`,
+    data: {
+      deleted_item_id: itemId,
+      cart_id: item.cart_id,
+      cart_empty: cartEmpty,
+      deleted_item: {
+        name: item.name,
+        price: item.price,
+        quantity: item.quantity,
       },
-    });
-  } catch (err) {
-    console.log("Error deleting item: ", err.message);
-    res.status(500).json({
-      success: false,
-      error: "Server Error",
-    });
-  }
+    },
+  });
 };
 
-export const clearCart = async (req, res, next) => {
-  try {
-    const userId = req.user.id;
+export const clearCart = async (req, res) => {
+  const deletedCount = await cartService.clearCart(req.user.id);
 
-    const deletedCount = await withTransaction(async (client) => {
-      // Clear cart
-      const deleteResult = await client.query(
-        "DELETE FROM cart_items WHERE cart_id IN (SELECT id FROM carts WHERE user_id = $1)",
-        [userId]
-      );
-
-      if (deleteResult.rowCount === 0) {
-        throw new HttpError(400, "Cart is already empty");
-      }
-
-      // Update cart timestamp
-      await client.query(
-        "UPDATE carts SET updated_at = NOW() WHERE user_id = $1",
-        [userId]
-      );
-
-      return deleteResult.rowCount;
-    });
-
-    const item = deletedCount === 1 ? "item" : "items";
-
-    res.status(200).json({
-      success: true,
-      message: `Cleared ${deletedCount} ${item} from cart`,
-      data: {
-        deleted_count: deletedCount,
-        cleared_at: new Date().toISOString(),
-      }
-    })
-  } catch (err) {
-    next(err);
-  }
+  res.status(200).json({
+    success: true,
+    message: `Cleared ${deletedCount} ${deletedCount === 1 ? "item" : "items"} from cart`,
+    data: {
+      deleted_count: deletedCount,
+      cleared_at: new Date().toISOString(),
+    },
+  });
 };
