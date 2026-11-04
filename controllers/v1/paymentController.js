@@ -2,6 +2,7 @@ import crypto from "crypto";
 import db from "../../config/db.js";
 import createTransporter from "../../utils/email.js";
 import { updateProductInventory } from "../../utils/inventory.js";
+import { withTransaction } from "../../utils/transaction.js";
 
 // For successful refunds, you might want a minimal gateway response
 const createMinimalGatewayResponse = (data) => {
@@ -186,7 +187,7 @@ const handleSuccessfulPayment = async (data) => {
 
     // Check if payment exist
     const existingPayment = await client.query(
-      "SELECT id FROM payment_logs WHERE payment_reference = $1",
+      "SELECT id FROM payment_logs WHERE payment_reference = $1 AND status = 'paid'",
       [reference]
     );
 
@@ -196,7 +197,7 @@ const handleSuccessfulPayment = async (data) => {
       return;
     }
 
-    // Update order status only if it's still pending and not cancelled/expired
+    // Update order status unless it's already paid or was cancelled/expired
     const updateQuery = `
       UPDATE orders
       SET
@@ -204,7 +205,7 @@ const handleSuccessfulPayment = async (data) => {
         payment_method = $1,
         order_status = 'processing',
         updated_at = now()
-      WHERE payment_ref = $2 AND status = 'pending' AND order_status <> 'cancelled'
+      WHERE payment_ref = $2 AND status IN ('pending', 'failed') AND order_status <> 'cancelled'
       RETURNING *
     `;
 
@@ -246,7 +247,7 @@ const handleSuccessfulPayment = async (data) => {
     // Log the payment transaction for audit trail
     await client.query(
       `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
-      ON CONFLICT (payment_reference) DO NOTHING`,
+      ON CONFLICT (payment_reference, status) DO NOTHING`,
       [
         order.id,
         reference,
@@ -469,7 +470,7 @@ const handleFailedPayment = async (data) => {
       await client.query(
         `INSERT INTO payment_logs (order_id, payment_reference, status, failure_reason, processed_by, created_at)
         VALUES ($1, $2, $3, $4, $5, now())
-        ON CONFLICT (payment_reference) DO NOTHING`,
+        ON CONFLICT (payment_reference, status) DO NOTHING`,
         [order.id, reference, "failed", gateway_response, "webhook"]
       );
 
@@ -517,294 +518,259 @@ const logUnappliedPayment = async (reference) => {
   }
 };
 
-// Handle successful refund
+// Errors are rethrown so the webhook responds 500 and Paystack retries
 const handleSuccessfulRefund = async (data) => {
-  try {
-    const { transaction_reference: reference, amount, customer, refund_reference, id: refund_id } = data;
+  const { transaction_reference: reference, amount, customer, refund_reference, id: refund_id } = data;
 
-    console.log("Processing successful refund:", {
-      reference,
-      amount: amount / 100, // Convert from kobo to naira
-      customer_email: customer?.email,
-      refund_reference: refund_reference || `refund-${refund_id}`,
-    });
+  console.log("Processing successful refund:", {
+    reference,
+    amount: amount / 100, // Convert from kobo to naira
+    customer_email: customer?.email,
+    refund_reference: refund_reference || `refund-${refund_id}`,
+  });
 
-    // Update order status to cancelled only if it's still pending
+  const order = await withTransaction(async (client) => {
+    // Orders already refunded don't match, so a repeated event does nothing
     const updateQuery = `
       UPDATE orders
       SET
           status = 'refunded',
           updated_at = now()
-      WHERE payment_ref = $1 AND order_status = 'cancelled'
+      WHERE payment_ref = $1 AND order_status = 'cancelled' AND status <> 'refunded'
       RETURNING *
     `;
 
-    const result = await db.query(updateQuery, [reference]);
+    const result = await client.query(updateQuery, [reference]);
 
-    if (result.rows.length > 0) {
-      const order = result.rows[0];
+    if (result.rows.length === 0) return null;
 
-      // Check if refund is already logged to prevent duplicates
-      const existingRefundLog = await db.query(
-        "SELECT id FROM payment_logs WHERE payment_reference = $1 AND status = 'refunded'",
-        [reference]
-      );
+    const refundedOrder = result.rows[0];
+    const gatewayResponse = createMinimalGatewayResponse(data);
 
-      if (existingRefundLog.rows.length > 0) {
-        console.log("Refund already logged for reference:", reference);
-        return;
-      }
+    console.log(`Order refund processed:`, {
+      order_id: refundedOrder.id,
+      user_id: refundedOrder.user_id,
+      previous_status: "cancelled",
+      new_status: "refunded",
+    });
 
-      const gatewayResponse = createMinimalGatewayResponse(data);
+    // Log the refund for audit trail
+    await client.query(
+      `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, now()) ON CONFLICT (payment_reference, status) DO NOTHING`,
+      [
+        refundedOrder.id,
+        reference,
+        "refunded",
+        amount / 100,
+        refundedOrder.payment_method,
+        "webhook",
+        gatewayResponse,
+      ]
+    );
 
-      console.log(`Order refund processed:`, {
-        order_id: order.id,
-        user_id: order.user_id,
-        previous_status: "cancelled",
-        new_status: "refunded",
-      });
+    // Update order status history
+    await client.query(
+      `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
+      [
+        refundedOrder.id,
+        "refunded",
+        `Payment was refunded to ${customer.email} with reference ${refund_id}`,
+      ]
+    );
 
-      // Log the refund for audit trail
-      await db.query(
-        `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, now()) ON CONFLICT (payment_reference) DO NOTHING`,
-        [
-          order.id,
-          reference,
-          "refunded",
-          amount / 100,
-          order.payment_method,
-          "webhook",
-          gatewayResponse,
-        ]
-      );
+    return refundedOrder;
+  });
 
-      // Update order status history
-      await db.query(
-        `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
-        [
-          order.id,
-          "refunded",
-          `Payment was refunded to ${customer.email} with reference ${refund_id}`,
-        ]
-      );
-
-      // Create transporter
-      const transporter = createTransporter();
-      
-      // Send refund email
-       const mailOptions = {
-        from: `E-commerce API <${process.env.EMAIL_USER}>`,
-        to: customer.email,
-        subject: "Refund Processed - Your Money is on the Way!",
-        html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-          <!-- Header -->
-          <div style="text-align: center; border-bottom: 2px solid #28a745; padding-bottom: 20px; margin-bottom: 30px;">
-            <h1 style="color: #28a745; margin: 0;">✅ Refund Processed!</h1>
-            <p style="color: #666; margin: 5px 0;">Your refund has been successfully processed</p>
-          </div>
-
-          <!-- Greeting -->
-          <p style="font-size: 16px;">Hi ${customer?.name || "Valued Customer"},</p>
-          <p>Great news! Your refund for order <strong>#${order.id}</strong> has been successfully processed and is on its way back to your account.</p>
-          
-          <!-- Success Banner -->
-          <div style="background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; padding: 15px; border-radius: 8px; margin: 20px 0; text-align: center;">
-            <strong>💰 Refund Successfully Processed</strong>
-          </div>
-
-          <!-- Refund Details Card -->
-          <div style="background-color: #f8f9fa; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 4px solid #28a745;">
-            <h3 style="margin-top: 0; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Refund Details</h3>
-            <table style="width: 100%; border-collapse: collapse;">
-              <tr>
-                <td style="padding: 10px 0; font-weight: bold; color: #555;">Order ID:</td>
-                <td style="padding: 10px 0; color: #007bff; font-weight: bold;">#${order.id}</td>
-              </tr>
-              <tr>
-                <td style="padding: 10px 0; font-weight: bold; color: #555;">Original Payment Reference:</td>
-                <td style="padding: 10px 0; font-family: monospace; background-color: #e9ecef; padding: 5px 8px; border-radius: 4px;">${order.payment_ref}</td>
-              </tr>
-              <tr>
-                <td style="padding: 10px 0; font-weight: bold; color: #555;">Refund ID:</td>
-                <td style="padding: 10px 0; font-family: monospace; background-color: #e9ecef; padding: 5px 8px; border-radius: 4px;">${refund_id}</td>
-              </tr>
-              <tr>
-                <td style="padding: 10px 0; font-weight: bold; color: #555;">Refund Amount:</td>
-                <td style="padding: 10px 0; font-size: 18px; color: #28a745; font-weight: bold;">
-                  ₦${(amount / 100).toLocaleString()}
-                </td>
-              </tr>
-              <tr>
-                <td style="padding: 10px 0; font-weight: bold; color: #555;">Processing Date:</td>
-                <td style="padding: 10px 0;">${new Date().toLocaleDateString("en-US", {
-                  year: "numeric",
-                  month: "long", 
-                  day: "numeric",
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}</td>
-              </tr>
-            </table>
-          </div>
-
-          <!-- Timeline Section -->
-          <div style="background-color: #e8f4f8; padding: 20px; border-radius: 8px; margin: 25px 0;">
-            <h3 style="margin-top: 0; color: #2c5aa0;">⏰ When Will You Receive Your Refund?</h3>
-            <div style="line-height: 1.8;">
-              <p style="margin: 10px 0;"><strong>💳 Card Payments:</strong> 3-5 business days</p>
-              <p style="margin: 10px 0;"><strong>🏦 Bank Transfers:</strong> 1-3 business days</p>
-              <p style="margin: 10px 0;"><strong>📱 Mobile Money:</strong> 1-2 business days</p>
-            </div>
-            <p style="font-size: 14px; color: #666; margin-bottom: 0;">
-              <strong>Note:</strong> Processing times may vary depending on your bank or payment provider.
-            </p>
-          </div>
-
-          <!-- Important Information -->
-          <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 8px; margin: 25px 0;">
-            <h4 style="margin-top: 0; color: #856404;">📋 Important Information</h4>
-            <ul style="margin: 10px 0; padding-left: 20px; color: #856404;">
-              <li>The refund will be credited to the same payment method used for the original purchase</li>
-              <li>You'll see the transaction appear as "Refund - Order #${order.id}" in your statement</li>
-              <li>If you don't see the refund after the expected timeframe, please contact your bank first</li>
-            </ul>
-          </div>
-
-          <!-- Support Section -->
-          <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 25px 0;">
-            <h4 style="margin-top: 0; color: #333;">Need Help? 🤝</h4>
-            <p style="margin-bottom: 10px;">Our customer support team is here to help:</p>
-            <ul style="list-style: none; padding-left: 0;">
-              <li style="margin: 8px 0;">📧 <strong>Email:</strong> ${process.env.EMAIL_USER}</li>
-              <li style="margin: 8px 0;">📞 <strong>Phone:</strong> ${process.env.SUPPORT_PHONE || '+234-XXX-XXXX-XXX'}</li>
-              <li style="margin: 8px 0;">💬 <strong>Live Chat:</strong> Available on our website</li>
-            </ul>
-            <p style="font-size: 14px; color: #666; margin-bottom: 0;">
-              Please reference Order ID <strong>#${order.id}</strong> and Refund ID <strong>${refund_id}</strong> when contacting support.
-            </p>
-          </div>
-
-          <!-- Footer -->
-          <div style="text-align: center; padding-top: 30px; border-top: 1px solid #ddd; margin-top: 40px;">
-            <p style="font-size: 18px; margin-bottom: 10px;">Thank you for your understanding! 🙏</p>
-            <p style="color: #666; margin-bottom: 20px;">
-              We're sorry to see you go, but we're here whenever you're ready to shop again.<br>
-              <strong>The E-commerce API Team</strong>
-            </p>
-            
-            <!-- Email Footer -->
-            <div style="font-size: 12px; color: #999; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
-              <p>This email was sent to <strong>${customer.email}</strong></p>
-              <p>© 2024 E-commerce API. All rights reserved.</p>
-              <p>If you have any concerns about this refund, please contact us immediately.</p>
-            </div>
-          </div>
-        </div>
-        `,
-      };
-
-      try {
-        await transporter.sendMail(mailOptions);
-        console.log("Refund email sent successfully");
-      } catch (emailErr) {
-        console.error("Error sending refund email:", emailErr);
-      }
-    } else {
-      console.log(
-        "No cancelled order found for refund reference:",
-        reference
-      );
-      console.log("This might mean the order was already refunded or not in a cancelled state");
-    }
-  } catch (err) {
-    console.error("Error processing successful refund:", {
-      error: err.message,
-      stack: err.stack,
-    })
+  if (!order) {
+    console.log("No cancelled order found for refund reference:", reference);
+    console.log("This might mean the order was already refunded or not in a cancelled state");
+    return;
   }
-}
+
+  // Create transporter
+  const transporter = createTransporter();
+  
+  // Send refund email
+   const mailOptions = {
+    from: `E-commerce API <${process.env.EMAIL_USER}>`,
+    to: customer.email,
+    subject: "Refund Processed - Your Money is on the Way!",
+    html: `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      <!-- Header -->
+      <div style="text-align: center; border-bottom: 2px solid #28a745; padding-bottom: 20px; margin-bottom: 30px;">
+        <h1 style="color: #28a745; margin: 0;">✅ Refund Processed!</h1>
+        <p style="color: #666; margin: 5px 0;">Your refund has been successfully processed</p>
+      </div>
+
+      <!-- Greeting -->
+      <p style="font-size: 16px;">Hi ${customer?.name || "Valued Customer"},</p>
+      <p>Great news! Your refund for order <strong>#${order.id}</strong> has been successfully processed and is on its way back to your account.</p>
+      
+      <!-- Success Banner -->
+      <div style="background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; padding: 15px; border-radius: 8px; margin: 20px 0; text-align: center;">
+        <strong>💰 Refund Successfully Processed</strong>
+      </div>
+
+      <!-- Refund Details Card -->
+      <div style="background-color: #f8f9fa; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 4px solid #28a745;">
+        <h3 style="margin-top: 0; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Refund Details</h3>
+        <table style="width: 100%; border-collapse: collapse;">
+          <tr>
+            <td style="padding: 10px 0; font-weight: bold; color: #555;">Order ID:</td>
+            <td style="padding: 10px 0; color: #007bff; font-weight: bold;">#${order.id}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 0; font-weight: bold; color: #555;">Original Payment Reference:</td>
+            <td style="padding: 10px 0; font-family: monospace; background-color: #e9ecef; padding: 5px 8px; border-radius: 4px;">${order.payment_ref}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 0; font-weight: bold; color: #555;">Refund ID:</td>
+            <td style="padding: 10px 0; font-family: monospace; background-color: #e9ecef; padding: 5px 8px; border-radius: 4px;">${refund_id}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 0; font-weight: bold; color: #555;">Refund Amount:</td>
+            <td style="padding: 10px 0; font-size: 18px; color: #28a745; font-weight: bold;">
+              ₦${(amount / 100).toLocaleString()}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 0; font-weight: bold; color: #555;">Processing Date:</td>
+            <td style="padding: 10px 0;">${new Date().toLocaleDateString("en-US", {
+              year: "numeric",
+              month: "long", 
+              day: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+            })}</td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- Timeline Section -->
+      <div style="background-color: #e8f4f8; padding: 20px; border-radius: 8px; margin: 25px 0;">
+        <h3 style="margin-top: 0; color: #2c5aa0;">⏰ When Will You Receive Your Refund?</h3>
+        <div style="line-height: 1.8;">
+          <p style="margin: 10px 0;"><strong>💳 Card Payments:</strong> 3-5 business days</p>
+          <p style="margin: 10px 0;"><strong>🏦 Bank Transfers:</strong> 1-3 business days</p>
+          <p style="margin: 10px 0;"><strong>📱 Mobile Money:</strong> 1-2 business days</p>
+        </div>
+        <p style="font-size: 14px; color: #666; margin-bottom: 0;">
+          <strong>Note:</strong> Processing times may vary depending on your bank or payment provider.
+        </p>
+      </div>
+
+      <!-- Important Information -->
+      <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 8px; margin: 25px 0;">
+        <h4 style="margin-top: 0; color: #856404;">📋 Important Information</h4>
+        <ul style="margin: 10px 0; padding-left: 20px; color: #856404;">
+          <li>The refund will be credited to the same payment method used for the original purchase</li>
+          <li>You'll see the transaction appear as "Refund - Order #${order.id}" in your statement</li>
+          <li>If you don't see the refund after the expected timeframe, please contact your bank first</li>
+        </ul>
+      </div>
+
+      <!-- Support Section -->
+      <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 25px 0;">
+        <h4 style="margin-top: 0; color: #333;">Need Help? 🤝</h4>
+        <p style="margin-bottom: 10px;">Our customer support team is here to help:</p>
+        <ul style="list-style: none; padding-left: 0;">
+          <li style="margin: 8px 0;">📧 <strong>Email:</strong> ${process.env.EMAIL_USER}</li>
+          <li style="margin: 8px 0;">📞 <strong>Phone:</strong> ${process.env.SUPPORT_PHONE || '+234-XXX-XXXX-XXX'}</li>
+          <li style="margin: 8px 0;">💬 <strong>Live Chat:</strong> Available on our website</li>
+        </ul>
+        <p style="font-size: 14px; color: #666; margin-bottom: 0;">
+          Please reference Order ID <strong>#${order.id}</strong> and Refund ID <strong>${refund_id}</strong> when contacting support.
+        </p>
+      </div>
+
+      <!-- Footer -->
+      <div style="text-align: center; padding-top: 30px; border-top: 1px solid #ddd; margin-top: 40px;">
+        <p style="font-size: 18px; margin-bottom: 10px;">Thank you for your understanding! 🙏</p>
+        <p style="color: #666; margin-bottom: 20px;">
+          We're sorry to see you go, but we're here whenever you're ready to shop again.<br>
+          <strong>The E-commerce API Team</strong>
+        </p>
+        
+        <!-- Email Footer -->
+        <div style="font-size: 12px; color: #999; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
+          <p>This email was sent to <strong>${customer.email}</strong></p>
+          <p>© 2024 E-commerce API. All rights reserved.</p>
+          <p>If you have any concerns about this refund, please contact us immediately.</p>
+        </div>
+      </div>
+    </div>
+    `,
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log("Refund email sent successfully");
+  } catch (emailErr) {
+    console.error("Error sending refund email:", emailErr);
+  }
+};
+
+// Log a refund event once, even if Paystack delivers it more than once
+const recordRefundEvent = async (reference, logFields, note) => {
+  await withTransaction(async (client) => {
+    const orderResult = await client.query(
+      "SELECT id FROM orders WHERE payment_ref = $1",
+      [reference]
+    );
+
+    if (orderResult.rows.length === 0) return;
+
+    const orderId = orderResult.rows[0].id;
+    const { status, failureReason = null } = logFields;
+
+    // Log the refund for audit trail
+    const logged = await client.query(
+      `INSERT INTO payment_logs (order_id, payment_reference, status, failure_reason, processed_by, created_at)
+      VALUES ($1, $2, $3, $4, $5, now())
+      ON CONFLICT (payment_reference, status) DO NOTHING
+      RETURNING id`,
+      [orderId, reference, status, failureReason, "webhook"]
+    );
+
+    if (logged.rows.length === 0) return;
+
+    // Update order status history
+    await client.query(
+      `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
+      [orderId, status, note]
+    );
+  });
+};
 
 // Handle failed refund
 const handleFailedRefund = async (data) => {
-  try {
-    const { transaction_reference: reference, customer } = data;
+  const { transaction_reference: reference, customer } = data;
 
-    console.log("Processing failed refund:", {
-      reference,
-      customer_email: customer?.email,
-    });
+  console.log("Processing failed refund:", {
+    reference,
+    customer_email: customer?.email,
+  });
 
-    const orderResult = await db.query(
-      "SELECT * FROM orders WHERE payment_ref = $1",
-      [reference]
-    );
-
-    if (orderResult.rows.length > 0) {
-      const order = orderResult.rows[0];
-
-      const gatewayResponse = createFailedRefundResponse(data);
-
-      // Log the refund for audit trail
-      await db.query(
-        `INSERT INTO payment_logs (order_id, payment_reference, status, failure_reason, processed_by, created_at)
-        VALUES ($1, $2, $3, $4, $5, now())`,
-        [order.id, reference, "refund_failed", gatewayResponse, "webhook"]
-      );
-
-      // Update order status history
-      await db.query(
-        `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
-        [order.id, "refund_failed", "Refund processing failed"]
-      );
-    }
-  } catch (err) {
-    console.error("Error processing failed refund:", {
-      error: err.message,
-      stack: err.stack,
-    })
-  }
-}
+  await recordRefundEvent(
+    reference,
+    { status: "refund_failed", failureReason: createFailedRefundResponse(data) },
+    "Refund processing failed"
+  );
+};
 
 // Handle pending refund
 const handlePendingRefund = async (data) => {
-  try {
-    const { transaction_reference: reference, customer } = data;
+  const { transaction_reference: reference, customer } = data;
 
-    console.log("Processing pending refund:", {
-      reference,
-      customer_email: customer?.email,
-    });
+  console.log("Processing pending refund:", {
+    reference,
+    customer_email: customer?.email,
+  });
 
-    const orderResult = await db.query(
-      "SELECT * FROM orders WHERE payment_ref = $1",
-      [reference]
-    );
-
-    if (orderResult.rows.length > 0) {
-      const order = orderResult.rows[0];
-
-      // Log refund for audit trail
-      await db.query(
-        `INSERT INTO payment_logs (order_id, payment_reference, status, processed_by, created_at)
-        VALUES ($1, $2, $3, $4, now())`,
-        [order.id, reference, "refund_pending", "webhook"]
-      );
-
-      // Update order status history
-      await db.query(
-        `INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)`,
-        [order.id, "refund_pending", "Refund is pending"]
-      );
-    }
-  } catch (err) {
-    console.error("Error processing pending refund:", {
-      error: err.message,
-      stack: err.stack,
-    })
-  }
-}
+  await recordRefundEvent(reference, { status: "refund_pending" }, "Refund is pending");
+};
 
 // Landing page after Paystack checkout. Display only: the webhook confirms payments
 export const paymentCallback = async (req, res) => {

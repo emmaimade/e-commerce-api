@@ -6,6 +6,7 @@ import {
   releaseOrderInventory,
   updateProductInventory,
 } from "../../utils/inventory.js";
+import { refundOrder } from "../../utils/refunds.js";
 import createTransporter from "../../utils/email.js";
 
 // create order
@@ -533,7 +534,7 @@ export const verifyPayment = async (req, res) => {
         payment_method = $2,
         order_status = CASE WHEN $1 = 'paid' THEN 'processing' ELSE order_status END,
         updated_at = now()
-      WHERE payment_ref = $3 AND status = 'pending' AND order_status <> 'cancelled'
+      WHERE payment_ref = $3 AND (status = 'pending' OR ($1 = 'paid' AND status = 'failed')) AND order_status <> 'cancelled'
       RETURNING *
     `;
 
@@ -575,7 +576,7 @@ export const verifyPayment = async (req, res) => {
         await client.query(
           `
             INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
-            ON CONFLICT (payment_reference) DO NOTHING
+            ON CONFLICT (payment_reference, status) DO NOTHING
           `,
           [
             updatedOrder.id,
@@ -770,7 +771,7 @@ export const verifyPayment = async (req, res) => {
         await client.query(
           `INSERT INTO payment_logs (order_id, payment_reference, status, failure_reason, processed_by, created_at)
         VALUES ($1, $2, $3, $4, $5, now())
-        ON CONFLICT (payment_reference) DO NOTHING`,
+        ON CONFLICT (payment_reference, status) DO NOTHING`,
           [
             updatedOrder.id,
             reference,
@@ -1017,71 +1018,6 @@ export const cancelOrder = async (req, res) => {
       });
     }
 
-    let refundProcessed = false;
-    let refundError = null;
-    let refundData = null;
-
-    // Handle refund if payment was made
-    if (order.status === "paid" && order.payment_ref) {
-      try {
-        const response = await axios.post(
-          "https://api.paystack.co/refund",
-          {
-            transaction: order.payment_ref,
-            amount: order.total * 100, // Convert to kobo
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-              "Content-Type": "application/json",
-            },
-            timeout: 30000, // 30 seconds timeout
-          }
-        );
-        const result = response.data;
-
-        if (
-          result.status &&
-          ["pending", "processed"].includes(result.data.status)
-        ) {
-          refundProcessed = true;
-          refundData = result.data;
-          console.log("Refund initiated successfully:", result.data);
-        } else {
-          console.log("Refund failed:", result);
-          refundError = result;
-        }
-      } catch (paystackError) {
-        console.log("Error processing refund", paystackError);
-
-        if (paystackError.response && paystackError.response.status === 400) {
-          const errorData = paystackError.response.data;
-
-          if (
-            errorData.code === "transaction_reversed" &&
-            errorData.message === "Transaction has been fully reversed"
-          ) {
-            refundProcessed = true;
-            refundData = {
-              status: "already_processed",
-              message: errorData.message,
-            };
-            console.log("Transaction already fully reversed: ", errorData);
-          } else {
-            console.log("Paystack refund error: ", errorData);
-            refundError = errorData;
-          }
-        } else {
-          await client.query("ROLLBACK");
-          return res.status(500).json({
-            success: false,
-            message: "Failed to process refund",
-            error: paystackError.message,
-          });
-        }
-      }
-    }
-
     // Update order status to cancelled
     await client.query(
       `UPDATE orders SET order_status = $1, updated_at = NOW() WHERE id = $2`,
@@ -1099,6 +1035,15 @@ export const cancelOrder = async (req, res) => {
 
     // Commit transaction
     await client.query("COMMIT");
+
+    // Refund after committing so no lock is held during the Paystack call
+    const refund =
+      order.status === "paid" && order.payment_ref
+        ? await refundOrder(order, "user")
+        : {};
+    const refundProcessed = refund.processed === true;
+    const refundData = refund.data;
+    const refundError = refund.error;
 
     // Create transporter
     const transporter = createTransporter();
@@ -1327,6 +1272,8 @@ export const cancelOrder = async (req, res) => {
             amount: refundData?.amount / 100,
             expected_at: refundData?.expected_at,
           }
+        : refundError
+        ? { status: "failed", message: refundError.message }
         : null,
     });
   } catch (err) {

@@ -6,16 +6,29 @@ import nodemailer from "nodemailer";
 // Controllers share these module objects, so replacing their methods mocks every call
 
 // Returns the list of emails "sent" so tests can inspect them
-export const mockEmail = () => {
+export const mockEmail = ({ onSend } = {}) => {
   const sent = [];
   mock.method(nodemailer, "createTransport", () => ({
     sendMail: async (message) => {
+      await onSend?.();
       sent.push(message);
       return {};
     },
   }));
   return sent;
 };
+
+export const mockPaystackRefund = ({ status = "pending", rejected = false, networkError = false, onCall } = {}) =>
+  mock.method(axios, "post", async () => {
+    await onCall?.();
+    if (networkError) throw new Error("connect ETIMEDOUT");
+    if (rejected) {
+      const error = new Error("Request failed with status code 400");
+      error.response = { status: 400, data: { status: false, message: "Refund rejected" } };
+      throw error;
+    }
+    return { data: { status: true, data: { status } } };
+  });
 
 export const mockPaystackInit = ({ ok = true, networkError = false } = {}) =>
   mock.method(axios, "post", async () => {

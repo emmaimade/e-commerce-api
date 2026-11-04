@@ -5,6 +5,7 @@ import {
   releaseOrderInventory,
   updateProductInventory,
 } from "../../utils/inventory.js";
+import { refundOrder } from "../../utils/refunds.js";
 import { uploadMultipleToCloudinary, deleteFromCloudinary } from "../../utils/cloudinaryUpload.js";
 import { getNextDayString, isValidDateFormat} from "../../utils/dateHelpers.js";
 import createTransporter from "../../utils/email.js";
@@ -878,7 +879,7 @@ export const verifyPaymentAdmin = async (req, res) => {
         payment_method = $2,
         order_status = CASE WHEN $1 = 'paid' THEN 'processing' ELSE order_status END,
         updated_at = now()
-      WHERE payment_ref = $3 AND status = 'pending' AND order_status <> 'cancelled'
+      WHERE payment_ref = $3 AND (status = 'pending' OR ($1 = 'paid' AND status = 'failed')) AND order_status <> 'cancelled'
       RETURNING *
     `;
 
@@ -905,7 +906,7 @@ export const verifyPaymentAdmin = async (req, res) => {
 
         // Log the payment transaction for audit trail
         await client.query(
-          `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now()) ON CONFLICT (payment_reference) DO NOTHING`,
+          `INSERT INTO payment_logs (order_id, payment_reference, status, amount, payment_method, processed_by, gateway_response, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now()) ON CONFLICT (payment_reference, status) DO NOTHING`,
           [
             result.rows[0].id,
             reference,
@@ -1077,7 +1078,7 @@ export const verifyPaymentAdmin = async (req, res) => {
         await client.query(
           `INSERT INTO payment_logs (order_id, payment_reference, status, failure_reason, processed_by, created_at)
         VALUES ($1, $2, $3, $4, $5, now())
-        ON CONFLICT (payment_reference) DO NOTHING`,
+        ON CONFLICT (payment_reference, status) DO NOTHING`,
           [
             result.rows[0].id,
             reference,
@@ -1138,6 +1139,16 @@ export const verifyPaymentAdmin = async (req, res) => {
   }
 };
 
+// Status an order can move to from each status. Only paid orders reach
+// "processing", so unpaid orders can't be shipped, and finished orders can't reopen.
+const ORDER_STATUS_TRANSITIONS = {
+  pending: ["cancelled"],
+  processing: ["shipped", "cancelled"],
+  shipped: ["delivered"],
+  delivered: [],
+  cancelled: [],
+};
+
 export const updateOrderStatus = async (req, res) => {
   const client = await db.connect();
 
@@ -1189,6 +1200,17 @@ export const updateOrderStatus = async (req, res) => {
     const currentOrder = currentOrderQuery.rows[0];
     const previousStatus = currentOrder.order_status;
 
+    // Check the order is allowed to move to this status
+    const allowedStatuses = ORDER_STATUS_TRANSITIONS[previousStatus] ?? [];
+    if (!allowedStatuses.includes(status)) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        success: false,
+        message: `Cannot change order status from ${previousStatus} to ${status}`,
+        allowed_statuses: allowedStatuses,
+      });
+    }
+
     // Check if order status has changed
     const shouldSendEmail = previousStatus !== status;
 
@@ -1211,6 +1233,15 @@ export const updateOrderStatus = async (req, res) => {
       "INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)",
       [orderId, status, notes]
     );
+
+    // Commit before emailing so the customer is only notified of saved changes
+    await client.query("COMMIT");
+
+    // Refund after committing so no lock is held during the Paystack call
+    const refund =
+      status === "cancelled" && currentOrder.status === "paid" && currentOrder.payment_ref
+        ? await refundOrder(currentOrder, "admin")
+        : null;
 
     // Send email notification if status changed
     if (shouldSendEmail) {
@@ -1400,14 +1431,17 @@ export const updateOrderStatus = async (req, res) => {
       }
     }
 
-    await client.query("COMMIT");
     res.status(200).json({
       success: true,
       message: "Order status updated successfully",
       data: {
         ...result.rows[0],
         email_sent: shouldSendEmail,
-        previous_status: previousStatus
+        previous_status: previousStatus,
+        refund: refund && {
+          status: refund.processed ? refund.data.status : "failed",
+          message: refund.error?.message,
+        },
       },
     });
   } catch (err) {

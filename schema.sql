@@ -98,7 +98,7 @@ CREATE TABLE order_status_history (
 CREATE TABLE payment_logs (
   id SERIAL PRIMARY KEY,
   order_id UUID REFERENCES orders(id),
-  payment_reference VARCHAR(255) UNIQUE NOT NULL,
+  payment_reference VARCHAR(255) NOT NULL,
   status VARCHAR(50) NOT NULL, -- 'paid', 'failed', 'pending'
   amount INTEGER, -- Amount in kobo
   payment_method VARCHAR(50), -- 'card', 'bank', 'ussd', etc.
@@ -106,7 +106,8 @@ CREATE TABLE payment_logs (
   failure_reason TEXT, -- For failed payments
   gateway_response JSONB, -- Store full Paystack response
   created_at TIMESTAMP DEFAULT now(),
-  updated_at TIMESTAMP DEFAULT now()
+  updated_at TIMESTAMP DEFAULT now(),
+  CONSTRAINT payment_logs_reference_status_key UNIQUE (payment_reference, status)
 );
 
 -- Create indexes for better performance
