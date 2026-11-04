@@ -16,10 +16,9 @@ import createTransporter from "../../utils/email.js";
 
 export const adminGetUsers = async (req, res) => {
   try {
-    const users = await db.query("SELECT * FROM users");
-    if (!users) {
-      return res.status(404).json({ message: "No users found" });
-    }
+    const users = await db.query(
+      "SELECT id, name, email, role, created_at, updated_at FROM users"
+    );
     res.status(200).json({ users: users.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -34,8 +33,11 @@ export const adminGetUser = async (req, res) => {
       return res.status(400).json({ message: "User ID is required" });
     }
 
-    const user = await db.query("SELECT * FROM users WHERE id = $1", [userId]);
-    if (!user) {
+    const user = await db.query(
+      "SELECT id, name, email, role, created_at, updated_at FROM users WHERE id = $1",
+      [userId]
+    );
+    if (user.rows.length === 0) {
       return res.status(404).json({ message: "User not found" });
     }
     res.status(200).json({ user: user.rows[0] });

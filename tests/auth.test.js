@@ -59,6 +59,30 @@ describe("auth and admin access", () => {
     assert.equal(profile.body.user.reset_password_token, undefined);
   });
 
+  it("never returns password hashes or reset tokens from admin user endpoints", async () => {
+    const admin = await createUser({ role: "admin" });
+    const auth = ["Authorization", `Bearer ${admin.token}`];
+
+    const list = await request(app).get("/v1/admin/users").set(...auth);
+    const single = await request(app).get(`/v1/admin/users/${admin.id}`).set(...auth);
+
+    assert.equal(list.status, 200);
+    assert.equal(single.status, 200);
+    for (const user of [list.body.users[0], single.body.user]) {
+      assert.equal(user.email, admin.email);
+      assert.equal("password" in user, false);
+      assert.equal("reset_password_token" in user, false);
+    }
+  });
+
+  it("returns 404 for an admin lookup of a user that doesn't exist", async () => {
+    const admin = await createUser({ role: "admin" });
+    const res = await request(app)
+      .get("/v1/admin/users/00000000-0000-0000-0000-000000000000")
+      .set("Authorization", `Bearer ${admin.token}`);
+    assert.equal(res.status, 404);
+  });
+
   it("rejects the test webhook for non-admins", async () => {
     const customer = await createUser();
     const res = await request(app)
