@@ -34,9 +34,9 @@ info:
     url: https://opensource.org/licenses/MIT
 
 servers:
-  - url: https://ecommerce-api-jq0h.onrender.com
+  - url: https://ecommerce-api-jq0h.onrender.com/v1
     description: Production server
-  - url: http://localhost:3000
+  - url: http://localhost:3000/v1
     description: Local development server
 
 security:
