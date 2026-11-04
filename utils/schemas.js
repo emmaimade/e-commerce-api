@@ -67,6 +67,12 @@ export const updateProductSchema = z.looseObject({
   status: z.enum(["active", "inactive", "out_of_stock"]).optional(),
 });
 
+export const refundsQuerySchema = z.looseObject({
+  status: z.enum(["required", "processing", "pending", "processed", "failed"]).optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).optional(),
+});
+
 export const paymentLogsQuerySchema = z.looseObject({
   order_id: id.optional(),
   page: z.coerce.number().int().min(1).optional(),

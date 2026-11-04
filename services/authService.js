@@ -3,44 +3,104 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import db from "../config/db.js";
 import { HttpError } from "../utils/httpError.js";
-import { UNIQUE_VIOLATION } from "../utils/validators.js";
-import { passwordResetEmail } from "../emails/authEmails.js";
+import {
+  accountExistsEmail,
+  passwordResetEmail,
+  verifyEmailEmail,
+} from "../emails/authEmails.js";
 import { sendEmail } from "./emailService.js";
 
 const BCRYPT_ROUNDS = 10;
 const RESET_TOKEN_LIFETIME_MS = 15 * 60 * 1000;
+const VERIFICATION_TOKEN_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
 // Compared against when an email is unknown, so a login takes the same time
 // whether or not the account exists
 const UNKNOWN_USER_HASH = bcrypt.hashSync(crypto.randomBytes(16).toString("hex"), BCRYPT_ROUNDS);
 
-// Reset links are stored hashed, so reading the database doesn't give anyone a usable link
-const hashResetToken = (token) =>
+// Emailed links are stored hashed, so reading the database doesn't give anyone a usable link
+const hashToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
 
+const createVerificationToken = () => {
+  const token = crypto.randomBytes(32).toString("hex");
+
+  return {
+    token,
+    hash: hashToken(token),
+    expiry: new Date(Date.now() + VERIFICATION_TOKEN_LIFETIME_MS),
+  };
+};
+
+// Emails go out in the background: waiting for them would make signup take
+// longer for one case than the other, and that alone would reveal which it was
+const sendVerificationEmail = ({ email, token }) =>
+  sendEmail({
+    to: email,
+    subject: "Verify Your Email",
+    html: verifyEmailEmail({
+      verifyUrl: `${process.env.BASE_URL}/v1/auth/verify-email/${token}`,
+    }),
+  });
+
+const sendAccountExistsEmail = (email) =>
+  sendEmail({
+    to: email,
+    subject: "Someone Tried to Register With Your Email",
+    html: accountExistsEmail(),
+  });
+
+// Answers the same whether or not the email is registered. The owner finds out
+// by email instead, so only they learn that an account exists.
 export const register = async ({ name, email, password }) => {
-  const existingUser = await db.query("SELECT id FROM users WHERE email = $1", [email]);
-
-  if (existingUser.rows.length > 0) {
-    throw new HttpError(400, "User already exists, try logging in");
-  }
-
   const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS);
+  const { token, hash, expiry } = createVerificationToken();
 
-  try {
-    const newUser = await db.query(
-      "INSERT INTO users (name, email, password) VALUES ($1, $2, $3) RETURNING id, name, email, role, created_at, updated_at",
-      [name, email, hashedPassword]
-    );
+  const created = await db.query(
+    `INSERT INTO users (name, email, password, verification_token, verification_token_expiry)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (email) DO NOTHING
+    RETURNING id`,
+    [name, email, hashedPassword, hash, expiry]
+  );
 
-    return newUser.rows[0];
-  } catch (err) {
-    // Two signups with the same email at the same moment
-    if (err.code === UNIQUE_VIOLATION) {
-      throw new HttpError(400, "User already exists, try logging in");
-    }
+  if (created.rows.length === 0) {
+    sendAccountExistsEmail(email);
+  } else {
+    sendVerificationEmail({ email, token });
+  }
+};
 
-    throw err;
+export const verifyEmail = async (token) => {
+  const verified = await db.query(
+    `UPDATE users
+    SET
+      email_verified = true,
+      verification_token = NULL,
+      verification_token_expiry = NULL,
+      updated_at = NOW()
+    WHERE verification_token = $1 AND verification_token_expiry > NOW()
+    RETURNING id`,
+    [hashToken(token)]
+  );
+
+  return verified.rows.length > 0;
+};
+
+// Answers the same for every email, like signup
+export const resendVerification = async (email) => {
+  const { token, hash, expiry } = createVerificationToken();
+
+  const user = await db.query(
+    `UPDATE users
+    SET verification_token = $1, verification_token_expiry = $2
+    WHERE email = $3 AND NOT email_verified
+    RETURNING id`,
+    [hash, expiry, email]
+  );
+
+  if (user.rows.length > 0) {
+    sendVerificationEmail({ email, token });
   }
 };
 
@@ -53,6 +113,11 @@ export const login = async ({ email, password }) => {
   // The same answer for both cases, so this can't be used to find accounts
   if (!user || !passwordMatch) {
     throw new HttpError(401, "Invalid credentials");
+  }
+
+  // Checked after the password, so only the owner can learn this about an account
+  if (!user.email_verified) {
+    throw new HttpError(403, "Please verify your email before logging in");
   }
 
   return jwt.sign(
@@ -74,7 +139,7 @@ export const requestPasswordReset = async (email) => {
 
   const user = await db.query(
     "UPDATE users SET reset_password_token = $1, reset_token_expiry = $2 WHERE email = $3 RETURNING id",
-    [hashResetToken(resetToken), expiry, email]
+    [hashToken(resetToken), expiry, email]
   );
 
   if (user.rows.length === 0) return;
@@ -88,7 +153,8 @@ export const requestPasswordReset = async (email) => {
   });
 };
 
-// One statement, so a link can't be used twice. Also signs out every session.
+// One statement, so a link can't be used twice. Also signs out every session, and
+// counts as verifying the email, because following the link proves the user owns it.
 export const resetPassword = async (token, password) => {
   const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
@@ -96,13 +162,14 @@ export const resetPassword = async (token, password) => {
     `UPDATE users
     SET
       password = $1,
+      email_verified = true,
       reset_password_token = NULL,
       reset_token_expiry = NULL,
       token_version = token_version + 1,
       updated_at = NOW()
     WHERE reset_password_token = $2 AND reset_token_expiry > NOW()
     RETURNING id`,
-    [hashedPassword, hashResetToken(token)]
+    [hashedPassword, hashToken(token)]
   );
 
   if (updated.rows.length === 0) {

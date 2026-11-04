@@ -1,6 +1,7 @@
 import app from './app.js';
 import db from './config/db.js';
 import { startOrderExpiryJob } from './services/orderExpiryService.js';
+import { startRefundRetryJob } from './services/refundService.js';
 
 // Tokens signed with an undefined secret would fail in confusing ways later
 if (!process.env.JWT_SECRET) {
@@ -9,20 +10,20 @@ if (!process.env.JWT_SECRET) {
 }
 
 const port = process.env.PORT || 3000;
-let expiryJob;
+let backgroundJobs = [];
 
 const server = app.listen(port, () => {
     console.log(`Server is running on http://localhost:${port}`);
     console.log(`API Documentation: http://localhost:${port}/v1/docs`);
     console.log(`Health Check: http://localhost:${port}/health`);
 
-    // Cancel unpaid orders after the payment window and release their stock
-    expiryJob = startOrderExpiryJob();
+    // Cancel unpaid orders after the payment window, and retry refunds Paystack couldn't take
+    backgroundJobs = [startOrderExpiryJob(), startRefundRetryJob()];
 });
 
 // Hosts stop the app on every deploy: finish in-flight requests first
 const shutdown = () => {
-    clearInterval(expiryJob);
+    backgroundJobs.forEach(clearInterval);
     server.close(async () => {
         await db.end();
         process.exit(0);

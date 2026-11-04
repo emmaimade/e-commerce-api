@@ -15,7 +15,7 @@ export const resetDatabase = async () => {
 export const clearTables = () =>
   db.query(
     `TRUNCATE users, addresses, products, carts, cart_items, orders, order_items,
-      order_status_history, payment_logs RESTART IDENTITY CASCADE`
+      order_status_history, payment_logs, refunds RESTART IDENTITY CASCADE`
   );
 
 export const closeDatabase = () => db.end();

@@ -1,4 +1,5 @@
 import * as paymentReportService from "../../services/paymentReportService.js";
+import * as refundService from "../../services/refundService.js";
 
 export const getPaymentStatusAdmin = async (req, res) => {
   const data = await paymentReportService.getPaymentStatus(req.params.reference);
@@ -18,6 +19,25 @@ export const getPaymentLogs = async (req, res) => {
   res.status(200).json({
     success: true,
     data,
+  });
+};
+
+export const getRefunds = async (req, res) => {
+  const data = await refundService.listRefunds(req.query);
+
+  res.status(200).json({
+    success: true,
+    data,
+  });
+};
+
+export const retryRefund = async (req, res) => {
+  const refund = await refundService.retryFailedRefund(req.params.refundId);
+
+  res.status(200).json({
+    success: true,
+    message: "Refund retried",
+    data: refund,
   });
 };
 

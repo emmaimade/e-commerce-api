@@ -11,8 +11,8 @@ The live API runs on a free tier, so the first request after a quiet period can 
 
 - **Reliable checkout:** stock is reserved under row locks when an order is placed, so two customers can't buy the last unit. Unpaid orders expire after 24 hours and release their stock.
 - **Safe payment handling:** Paystack webhooks are signature-checked and safe to receive twice. Every route that confirms a payment goes through one shared transaction.
-- **Refunds:** cancelling a paid order refunds it through Paystack. Refunds that fail are recorded for an admin to follow up.
-- **Security:** revocable JWTs, role checks against the database, rate limiting, request validation, hashed reset tokens and security headers.
+- **Refunds that can't get lost:** a refund is saved in the same transaction as the cancellation, then sent to Paystack. Temporary failures retry automatically, payments that arrive after an order was cancelled are refunded automatically, and admins get a queue for anything that needs a person.
+- **Security:** email verification, revocable JWTs, role checks against the database, rate limiting, request validation, hashed tokens and security headers.
 - **Tested:** integration tests run the real API against a real PostgreSQL database, on every push through GitHub Actions.
 
 ## Tech stack
@@ -49,7 +49,7 @@ routes → middleware → controllers → services → database, Paystack, email
 ├── scripts/         Migration runner
 ├── tests/           Integration tests
 ├── app.js           Express app setup
-├── server.js        Starts the server and the order expiry job
+├── server.js        Starts the server and the background jobs
 ├── schema.sql       Full schema for a new database
 └── swagger.yaml     API documentation
 ```
@@ -90,7 +90,7 @@ You need Node.js 22 or newer and PostgreSQL 13 or newer.
 
 ### Create an admin
 
-Register a normal account, then promote it in the database:
+Register an account, follow the link in the verification email, then promote it in the database:
 
 ```sql
 UPDATE users SET role = 'admin' WHERE email = 'you@example.com';
@@ -119,14 +119,14 @@ All routes start with `/v1`. Most require an `Authorization: Bearer <token>` hea
 
 | Area | Routes |
 |---|---|
-| Auth | `POST /auth/register`, `/auth/login`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password/:token` |
+| Auth | `POST /auth/register`, `/auth/resend-verification`, `/auth/login`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password/:token`, `GET /auth/verify-email/:token` |
 | Profile | `GET /user/profile`, `PATCH /user/updateprofile` |
 | Products | `GET /product`, `GET /product/:id` |
 | Cart | `GET`, `POST`, `DELETE /cart`, plus `PATCH`, `DELETE /cart/:id` |
 | Addresses | `GET`, `POST /shipping`, plus `GET`, `PATCH`, `DELETE /shipping/:id` |
 | Orders | `POST`, `GET /order`, `GET /order/:id`, `GET /order/:id/history`, `DELETE /order/:id` |
 | Payments | `GET /order/payment/verify/:reference`, `GET /payments/status/:reference`, `POST /payments/webhook` |
-| Admin | `/admin/users`, `/admin/products`, `/admin/orders`, `/admin/payments` |
+| Admin | `/admin/users`, `/admin/products`, `/admin/orders`, `/admin/payments`, `/admin/refunds` |
 
 ### Errors
 
@@ -161,9 +161,24 @@ pending ──paid──► processing ──► shipped ──► delivered
 
 Unpaid orders are cancelled automatically after 24 hours. Other status changes are rejected with a 409.
 
+### Refunds
+
+Refunds are always for the full amount, and each payment can only have one.
+
+```
+required ──► processing ──► pending ──► processed
+    ▲            │  │
+    └─ retry ────┘  └──► failed ──► (admin retry)
+```
+
+- Temporary failures, such as Paystack being unreachable, retry up to 5 attempts with growing delays.
+- A clear rejection from Paystack fails straight away, because retrying won't change the answer.
+- Paystack's refund webhooks have the final say, and stop any retry still waiting.
+- Admins see stuck refunds at `GET /v1/admin/refunds?status=failed`, and retry them with `POST /v1/admin/refunds/:id/retry`.
+
 ## Testing
 
-Tests run the real API against a local PostgreSQL database. Paystack, email and Cloudinary are mocked.
+Tests run the real API against a local PostgreSQL database. Paystack, email and Cloudinary are mocked, and real email can't be sent during a test run.
 
 1. Create an empty `ecommerce_test` database.
 2. Set `TEST_DATABASE_URL` in `.env`. It must point to localhost, because the database is wiped on every run.

@@ -30,6 +30,15 @@ const formatIssues = (error) =>
     message: issue.message,
   }));
 
+// For router.param, on routes for tables with numeric ids
+export const validateIntegerParam = (req, res, next, value, name) => {
+  if (!/^\d+$/.test(value)) {
+    return validationError(res, [{ field: name, message: "Must be a valid id" }]);
+  }
+
+  next();
+};
+
 // For router.param: rejects route ids that aren't UUIDs before they reach the database
 export const validateUuidParam = (req, res, next, value, name) => {
   if (!isValidUuid(value)) {

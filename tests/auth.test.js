@@ -3,7 +3,7 @@ import { describe, it, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import request from "supertest";
 import app from "../app.js";
-import { resetDatabase, clearTables, closeDatabase, createUser } from "./helpers/db.js";
+import { db, resetDatabase, clearTables, closeDatabase, createUser } from "./helpers/db.js";
 
 describe("auth and admin access", () => {
   before(resetDatabase);
@@ -46,7 +46,8 @@ describe("auth and admin access", () => {
       confirmPassword: "secret123",
     });
     assert.equal(register.status, 201);
-    assert.equal(register.body.user.password, undefined);
+    assert.doesNotMatch(register.text, /password/i);
+    await db.query("UPDATE users SET email_verified = true");
 
     const login = await request(app)
       .post("/v1/auth/login")

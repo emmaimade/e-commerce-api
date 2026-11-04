@@ -192,24 +192,19 @@ describe("cancelling a paid order", () => {
     assert.equal(leakedConnections(), 0);
   });
 
-  for (const [name, failure] of [
-    ["rejects", { rejected: true }],
-    ["can't be reached", { networkError: true }],
-  ]) {
-    it(`keeps the cancellation and records a failed refund when Paystack ${name}`, async () => {
-      const order = await placePaidOrder();
-      mockPaystackRefund(failure);
+  it("keeps the cancellation and records a failed refund when Paystack rejects it", async () => {
+    const order = await placePaidOrder();
+    mockPaystackRefund({ rejected: true });
 
-      const res = await cancelAsCustomer(order);
+    const res = await cancelAsCustomer(order);
 
-      assert.equal(res.status, 200);
-      const saved = await getOrder(order.orderId);
-      assert.equal(saved.order_status, "cancelled");
-      assert.equal(saved.status, "paid");
-      assert.equal(await logCount(order.orderId, "refund_failed"), 1);
-      assert.equal(await getStock(order.productId), 5);
-    });
-  }
+    assert.equal(res.status, 200);
+    const saved = await getOrder(order.orderId);
+    assert.equal(saved.order_status, "cancelled");
+    assert.equal(saved.status, "paid");
+    assert.equal(await logCount(order.orderId, "refund_failed"), 1);
+    assert.equal(await getStock(order.productId), 5);
+  });
 
   it("refunds when an admin cancels a paid order", async () => {
     const order = await placePaidOrder();

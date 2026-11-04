@@ -117,6 +117,7 @@ describe("token revocation", () => {
     await request(app)
       .post("/v1/auth/register")
       .send({ name: "Person", ...credentials, confirmPassword: credentials.password });
+    await db.query("UPDATE users SET email_verified = true");
     const login = await request(app).post("/v1/auth/login").send(credentials);
     return login.body.token;
   };

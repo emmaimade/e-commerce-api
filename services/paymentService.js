@@ -10,6 +10,7 @@ import {
 import { sendEmail } from "./emailService.js";
 import { updateProductInventory } from "./inventoryService.js";
 import { verifyTransaction } from "./paystackService.js";
+import { attemptRefund, recordRefundStatus, requestRefund } from "./refundService.js";
 
 const PAYMENT_CONFIRMED_SUBJECT = "Payment Confirmed - Your Order is Being Processed";
 
@@ -92,18 +93,37 @@ const markOrderFailed = ({ reference, channel = null, reason, processedBy }) =>
     return order;
   });
 
-// A successful charge that couldn't be applied to a pending order. If the order
-// was cancelled or expired, the customer has paid for nothing and needs a refund.
-const logUnappliedPayment = async (reference) => {
-  const existing = await db.query(
-    "SELECT id, status, order_status FROM orders WHERE payment_ref = $1",
-    [reference]
-  );
-  const order = existing.rows[0];
+// A successful charge that couldn't be applied to an order. If the order was
+// cancelled or expired, the customer has paid for nothing, so the money goes back.
+const refundLatePayment = async (reference, amount) => {
+  const refund = await withTransaction(async (client) => {
+    const result = await client.query("SELECT * FROM orders WHERE payment_ref = $1 FOR UPDATE", [reference]);
+    const order = result.rows[0];
 
-  if (order?.order_status === "cancelled" && order.status !== "paid") {
-    console.error(`REFUND REQUIRED: payment ${reference} received for cancelled order ${order.id}`);
-  }
+    if (order?.order_status !== "cancelled" || ["paid", "refunded"].includes(order.status)) {
+      return null;
+    }
+
+    const created = await requestRefund(client, { order, amount, requestedBy: "late_payment" });
+
+    if (!created) return null;
+
+    await client.query(
+      `INSERT INTO payment_logs (order_id, payment_reference, status, amount, processed_by, created_at)
+      VALUES ($1, $2, $3, $4, $5, now())
+      ON CONFLICT (payment_reference, status) DO NOTHING`,
+      [order.id, reference, "late_payment", amount, "system"]
+    );
+
+    await client.query(
+      "INSERT INTO order_status_history (order_id, status, notes) VALUES ($1, $2, $3)",
+      [order.id, "refund_required", "Payment received after the order was cancelled"]
+    );
+
+    return created;
+  });
+
+  if (refund) await attemptRefund(refund.id);
 };
 
 // ---- Webhook events. Errors reach the webhook as a 500, so Paystack retries;
@@ -122,7 +142,7 @@ const handleChargeSuccess = async (data) => {
   });
 
   if (!order) {
-    await logUnappliedPayment(reference);
+    await refundLatePayment(reference, amount / 100);
     return;
   }
 
@@ -140,6 +160,8 @@ const handleRefundProcessed = async (data) => {
   const { transaction_reference: reference, amount, customer, id: refund_id } = data;
 
   const order = await withTransaction(async (client) => {
+    await recordRefundStatus(client, reference, "processed");
+
     // Orders already refunded don't match, so a repeated event does nothing
     const result = await client.query(
       `UPDATE orders
@@ -195,6 +217,13 @@ const handleRefundProcessed = async (data) => {
 // Log a refund event once, even if Paystack delivers it more than once
 const recordRefundEvent = (reference, { status, failureReason = null }, note) =>
   withTransaction(async (client) => {
+    await recordRefundStatus(
+      client,
+      reference,
+      status === "refund_failed" ? "failed" : "pending",
+      status === "refund_failed" ? "Paystack reported the refund failed" : null
+    );
+
     const orderResult = await client.query("SELECT id FROM orders WHERE payment_ref = $1", [reference]);
 
     if (orderResult.rows.length === 0) return;
@@ -241,6 +270,7 @@ const webhookHandlers = {
   "charge.failed": handleChargeFailed,
   "refund.processed": handleRefundProcessed,
   "refund.failed": handleRefundFailed,
+  "refund.needs-attention": handleRefundFailed,
   "refund.pending": handleRefundPending,
 };
 
@@ -299,6 +329,8 @@ const settleTransaction = async ({ reference, order, transaction, processedBy, n
       });
 
   if (!updatedOrder) {
+    if (paid) await refundLatePayment(reference, transaction.amount / 100 || order.total);
+
     throw new HttpError(409, "Order is no longer awaiting payment");
   }
 

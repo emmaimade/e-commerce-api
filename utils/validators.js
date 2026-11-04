@@ -5,6 +5,3 @@ export const isValidUuid = (value) =>
 
 // Postgres error code for a row still referenced by another table
 export const FOREIGN_KEY_VIOLATION = "23503";
-
-// Postgres error code for a value that must be unique
-export const UNIQUE_VIOLATION = "23505";

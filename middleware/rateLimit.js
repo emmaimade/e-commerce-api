@@ -22,5 +22,6 @@ export const loginLimiter = limiter({
 });
 
 export const registerLimiter = limiter({ windowMs: ONE_HOUR, limit: 10 });
+export const resendVerificationLimiter = limiter({ windowMs: ONE_HOUR, limit: 5 });
 export const forgotPasswordLimiter = limiter({ windowMs: ONE_HOUR, limit: 5 });
 export const resetPasswordLimiter = limiter({ windowMs: FIFTEEN_MINUTES, limit: 10 });

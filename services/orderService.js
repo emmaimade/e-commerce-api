@@ -12,7 +12,7 @@ import {
   reserveOrderInventory,
 } from "./inventoryService.js";
 import { initializeTransaction } from "./paystackService.js";
-import { refundOrder } from "./refundService.js";
+import { attemptRefund, requestRefund } from "./refundService.js";
 
 // Status an order can move to from each status. Only paid orders reach
 // "processing", so unpaid orders can't be shipped, and finished orders can't reopen.
@@ -259,7 +259,7 @@ export const getCustomerOrderHistory = async (orderId, userId) => {
 };
 
 export const cancelCustomerOrder = async (orderId, userId) => {
-  const order = await withTransaction(async (client) => {
+  const { order, pendingRefund } = await withTransaction(async (client) => {
     const result = await client.query(
       `SELECT
         o.*, u.email, u.name
@@ -287,11 +287,16 @@ export const cancelCustomerOrder = async (orderId, userId) => {
     await addStatusHistory(client, orderId, "cancelled", "Order cancelled by user");
     await releaseOrderInventory(orderId, client);
 
-    return lockedOrder;
+    const pendingRefund =
+      lockedOrder.status === "paid" && lockedOrder.payment_ref
+        ? await requestRefund(client, { order: lockedOrder, amount: lockedOrder.total, requestedBy: "user" })
+        : null;
+
+    return { order: lockedOrder, pendingRefund };
   });
 
   // Refund after committing so no lock is held during the Paystack call
-  const refund = order.status === "paid" && order.payment_ref ? await refundOrder(order, "user") : {};
+  const refund = pendingRefund ? await attemptRefund(pendingRefund.id) : {};
   const refundProcessed = refund.processed === true;
 
   await sendEmail({
@@ -406,7 +411,7 @@ export const getOrder = async (orderId) => {
 };
 
 export const changeOrderStatus = async (orderId, status, notes) => {
-  const { currentOrder, previousStatus, updatedOrder } = await withTransaction(async (client) => {
+  const { currentOrder, previousStatus, updatedOrder, pendingRefund } = await withTransaction(async (client) => {
     const current = await client.query(
       `SELECT
         o.*,
@@ -444,14 +449,16 @@ export const changeOrderStatus = async (orderId, status, notes) => {
 
     await addStatusHistory(client, orderId, status, notes);
 
-    return { currentOrder, previousStatus, updatedOrder: updated.rows[0] };
+    const pendingRefund =
+      status === "cancelled" && currentOrder.status === "paid" && currentOrder.payment_ref
+        ? await requestRefund(client, { order: currentOrder, amount: currentOrder.total, requestedBy: "admin" })
+        : null;
+
+    return { currentOrder, previousStatus, updatedOrder: updated.rows[0], pendingRefund };
   });
 
   // Refund after committing so no lock is held during the Paystack call
-  const refund =
-    status === "cancelled" && currentOrder.status === "paid" && currentOrder.payment_ref
-      ? await refundOrder(currentOrder, "admin")
-      : null;
+  const refund = pendingRefund ? await attemptRefund(pendingRefund.id) : null;
 
   await sendEmail({
     to: currentOrder.email,

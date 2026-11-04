@@ -25,6 +25,21 @@ export const resetPasswordPage = () =>
     </form>`
   );
 
+export const emailVerificationPage = ({ verified }) => {
+  const heading = verified ? "Email verified" : "This link is invalid or has expired";
+  const message = verified
+    ? "Your account is ready. You can now log in."
+    : "Links last 24 hours and work once. You can request a new one from the login page.";
+
+  return page(
+    heading,
+    `<div style="text-align: center;">
+      <h2 style="color: #333;">${heading}</h2>
+      <p style="color: #666;">${message}</p>
+    </div>`
+  );
+};
+
 export const paymentStatusPage = ({ paid }) => {
   const heading = paid ? "Payment confirmed" : "Your payment is being confirmed";
   const message = paid

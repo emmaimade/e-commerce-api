@@ -13,6 +13,9 @@ CREATE TABLE users (
 	reset_password_token VARCHAR(255),
 	reset_token_expiry TIMESTAMPTZ,
 	token_version INTEGER NOT NULL DEFAULT 0, -- raised to revoke all of a user's tokens
+	email_verified BOOLEAN NOT NULL DEFAULT false,
+	verification_token VARCHAR(255),
+	verification_token_expiry TIMESTAMPTZ,
 	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -111,10 +114,26 @@ CREATE TABLE payment_logs (
   CONSTRAINT payment_logs_reference_status_key UNIQUE (payment_reference, status)
 );
 
+-- Create refunds table (depends on orders)
+CREATE TABLE refunds (
+  id SERIAL PRIMARY KEY,
+  order_id UUID NOT NULL REFERENCES orders(id),
+  payment_reference VARCHAR(255) NOT NULL UNIQUE,
+  amount INTEGER NOT NULL, -- Amount in naira
+  status VARCHAR(20) NOT NULL DEFAULT 'required', -- 'required', 'processing', 'pending', 'processed', 'failed'
+  requested_by VARCHAR(50) NOT NULL, -- 'user', 'admin', 'late_payment'
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Create indexes for better performance
 CREATE INDEX idx_payment_logs_reference ON payment_logs(payment_reference);
 CREATE INDEX idx_payment_logs_order_id ON payment_logs(order_id);
 CREATE INDEX idx_payment_logs_status ON payment_logs(status);
+CREATE INDEX idx_refunds_status ON refunds(status);
 CREATE INDEX IF NOT EXISTS idx_order_status_history_order_id ON order_status_history(order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_order_status ON orders(order_status);
 CREATE INDEX IF NOT EXISTS idx_orders_pending_placed_at ON orders(placed_at) WHERE order_status = 'pending';
@@ -129,3 +148,4 @@ ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE order_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE order_status_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE payment_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE refunds ENABLE ROW LEVEL SECURITY;

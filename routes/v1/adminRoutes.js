@@ -17,23 +17,27 @@ import {
   getPaymentStatusAdmin,
   getPaymentLogs,
   getPaymentAnalytics,
+  getRefunds,
+  retryRefund,
 } from "../../controllers/v1/adminPaymentController.js";
 import {
   getProducts,
   getProduct,
 } from "../../controllers/v1/productController.js";
 import { upload } from "../../middleware/upload.js";
-import { validate, validateUuidParam } from "../../middleware/validate.js";
+import { validate, validateIntegerParam, validateUuidParam } from "../../middleware/validate.js";
 import {
   updateProductSchema,
   updateOrderStatusSchema,
   verifyPaymentSchema,
   paymentLogsQuerySchema,
+  refundsQuerySchema,
 } from "../../utils/schemas.js";
 
 const router = express.Router();
 
 router.param("id", validateUuidParam);
+router.param("refundId", validateIntegerParam);
 
 // USERS
 router.get("/users", adminAuth, adminGetUsers);
@@ -56,6 +60,10 @@ router.put("/orders/:id/status", adminAuth, validate({ body: updateOrderStatusSc
 // PAYMENTS
 router.get("/payments/status/:reference", adminAuth, getPaymentStatusAdmin);
 router.get("/payments/logs", adminAuth, validate({ query: paymentLogsQuerySchema }), getPaymentLogs);
-router.get("/payments/analytics", adminAuth, getPaymentAnalytics);  
+router.get("/payments/analytics", adminAuth, getPaymentAnalytics);
+
+// REFUNDS
+router.get("/refunds", adminAuth, validate({ query: refundsQuerySchema }), getRefunds);
+router.post("/refunds/:refundId/retry", adminAuth, retryRefund);  
 
 export default router;

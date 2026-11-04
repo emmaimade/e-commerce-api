@@ -18,7 +18,8 @@ const register = () =>
 // Request a reset and return the path of the link in the email
 const requestResetLink = async (sent) => {
   await request(app).post("/v1/auth/forgot-password").send({ email });
-  const link = sent[0].html.match(/href="([^"]+)"/)[1];
+  const resetEmail = sent.find((message) => message.subject === "Password Reset Request");
+  const link = resetEmail.html.match(/href="([^"]+)"/)[1];
   return new URL(link).pathname;
 };
 

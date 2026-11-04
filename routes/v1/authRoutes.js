@@ -6,6 +6,8 @@ import {
   resetPassword,
   showResetPasswordForm,
   logout,
+  verifyEmail,
+  resendVerification,
 } from "../../controllers/v1/authController.js";
 
 import {
@@ -13,6 +15,7 @@ import {
   registerLimiter,
   forgotPasswordLimiter,
   resetPasswordLimiter,
+  resendVerificationLimiter,
 } from "../../middleware/rateLimit.js";
 import { auth } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validate.js";
@@ -26,6 +29,8 @@ import {
 const router = express.Router();
 
 router.post("/register", registerLimiter, validate({ body: registerSchema }), register);
+router.get("/verify-email/:token", verifyEmail);
+router.post("/resend-verification", resendVerificationLimiter, validate({ body: forgotPasswordSchema }), resendVerification);
 router.post("/login", loginLimiter, validate({ body: loginSchema }), login);
 router.post("/logout", auth, logout);
 router.post("/forgot-password", forgotPasswordLimiter, validate({ body: forgotPasswordSchema }), forgotPassword);
