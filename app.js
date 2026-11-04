@@ -1,7 +1,9 @@
 import express from 'express';
-import bodyParser from 'body-parser';
+import helmet from 'helmet';
+import cors from 'cors';
 import swaggerUI from 'swagger-ui-express';
-import YAML from "yamljs"
+import { parse as parseYaml } from "yaml";
+import fs from "fs";
 import path from "path";
 import { fileURLToPath } from 'url';
 
@@ -22,17 +24,36 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Proxies in front of the app, so req.ip (used for rate limiting) is the real client
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS) || 1);
 
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      // The reset and payment pages style elements inline
+      styleSrcAttr: ["'unsafe-inline'"],
+      // Would force http://localhost to https during development
+      upgradeInsecureRequests: null,
+    },
+  },
+}));
+
+// Sites allowed to call the API from a browser, comma separated. None by default.
+const allowedOrigins = (process.env.CORS_ORIGINS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+app.use(cors({ origin: allowedOrigins }));
+
 // Raw body parser for webhooks before express.json
 app.use('/v1/payments/webhook', express.raw({type: 'application/json'}));
 
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 // ========================================
 // SWAGGER DOCUMENTATION
 // ========================================
 
-const swaggerDocument = YAML.load(path.join(__dirname, "swagger.yaml"));
+const swaggerDocument = parseYaml(fs.readFileSync(path.join(__dirname, "swagger.yaml"), "utf8"));
 
 app.use(
   '/v1/docs',

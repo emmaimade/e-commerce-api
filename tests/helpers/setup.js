@@ -16,6 +16,7 @@ process.env.NODE_ENV = "test";
 process.env.JWT_SECRET = "test-jwt-secret";
 process.env.PAYSTACK_SECRET_KEY = "test-paystack-secret";
 process.env.BASE_URL = "http://localhost:3000";
+process.env.CORS_ORIGINS = "https://shop.test";
 
 // The app logs heavily; set DEBUG=1 to see it
 if (!process.env.DEBUG) console.log = () => {};

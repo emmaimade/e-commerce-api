@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import request from "supertest";
 import app from "../app.js";
 import {
-  resetDatabase, clearTables, closeDatabase, createUser, createAddress,
+  db, resetDatabase, clearTables, closeDatabase, createUser, createAddress,
   createProduct, addToCart, getStock, getOrder, countRows, leakedConnections, openTransactions,
 } from "./helpers/db.js";
 import { mockEmail, mockPaystackInit, restoreMocks } from "./helpers/mocks.js";
@@ -132,6 +132,21 @@ describe("POST /v1/order (checkout)", () => {
     assert.equal(res.status, 200);
     assert.equal(leakedConnections(), 0);
     assert.equal(await openTransactions(), 0);
+  });
+
+  it("refuses checkout when a cart product is no longer for sale", async () => {
+    mockPaystackInit();
+    const user = await createUser();
+    const addressId = await createAddress(user.id);
+    const productId = await createProduct({ stock: 5 });
+    await addToCart(user.id, productId, 1);
+    await db.query("UPDATE products SET status = 'inactive' WHERE id = $1", [productId]);
+
+    const res = await checkout(user, addressId);
+
+    assert.equal(res.status, 400);
+    assert.equal(await countRows("orders"), 0);
+    assert.equal(await getStock(productId), 5);
   });
 
   it("rejects a shipping address that belongs to another user", async () => {

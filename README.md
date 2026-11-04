@@ -1,6 +1,6 @@
 # 🛒 E-Commerce API
 
-A comprehensive RESTful API for managing an e-commerce platform, built using Node.js, Express.js, and PostgreSQL. The API includes secure user authentication, product management with image uploads via Cloudinary, and order processing with payment integration. The database schema is managed using pgAdmin, and API documentation is served via Swagger UI.
+A comprehensive RESTful API for managing an e-commerce platform, built using Node.js, Express.js, and PostgreSQL. The API includes secure user authentication, product management with image uploads via Cloudinary, and order processing with payment integration. API documentation is served via Swagger UI.
 
 ## 🚀 Live Demo
 
@@ -22,8 +22,12 @@ A comprehensive RESTful API for managing an e-commerce platform, built using Nod
 ### 🔐 Security Features
 - JWT authentication and authorization
 - Password hashing with bcrypt
-- Input validation and sanitization
-- API key authentication for admin routes
+- Role-based access for admin routes
+- Request validation with zod
+- Rate limiting on login, signup and password reset
+- Security headers with Helmet and a CORS allowlist
+- Password reset tokens stored hashed
+- Paystack webhook signature verification
 
 ### 📊 Additional Features
 - User profiles and account management
@@ -37,19 +41,18 @@ A comprehensive RESTful API for managing an e-commerce platform, built using Nod
 
 - **Backend**: Node.js with Express.js
 - **Database**: PostgreSQL with pg (node-postgres) driver
-- **Database Management**: pgAdmin
 - **Authentication**: JSON Web Tokens (JWT)
 - **Password Hashing**: bcrypt
 - **File Upload**: Multer with Cloudinary integration
 - **Documentation**: Swagger UI Express with YAML
+- **Testing**: Node.js test runner with Supertest
 
 ## Getting Started
 
 ### Prerequisites
 
-- Node.js (v14.0.0 or higher)
-- PostgreSQL (v12.0 or higher)
-- pgAdmin (for database management)
+- Node.js (v22 or higher)
+- PostgreSQL (v13 or higher)
 - npm or yarn package manager
 
 ### Installation
@@ -70,6 +73,8 @@ A comprehensive RESTful API for managing an e-commerce platform, built using Nod
    ```env
    PORT=3000
    DATABASE_URL=postgresql://postgres:your-password@localhost:5432/ecommerce
+   TEST_DATABASE_URL=postgresql://postgres:your-password@localhost:5432/ecommerce_test
+   BASE_URL=http://localhost:3000
    JWT_SECRET=your-secret-key-here
    EMAIL_USER=your-email@gmail.com
    EMAIL_PASS=your-app-password
@@ -77,18 +82,16 @@ A comprehensive RESTful API for managing an e-commerce platform, built using Nod
    CLOUDINARY_API_KEY=your-cloudinary-key
    CLOUDINARY_API_SECRET=your-cloudinary-secret
    PAYSTACK_SECRET_KEY=your-paystack-secret-key
-   WEBHOOK_URL=http://localhost:3000/v1/payments/webhook
    ```
 
-4. **Database Setup**
-   - Open pgAdmin and create a new database named `ecommerce`
-   - Apply the schema from the schema.sql file in the repository
+   See `.env.example` for the full list, including `CORS_ORIGINS` and `TRUST_PROXY_HOPS`.
 
-  ```sql
-  CREATE DATABASE ecommerce;
-  CREATE EXTENSION IF NOT EXISTS pgcrypto;
-  -- Copy and execute the CREATE TABLE and CREATE INDEX statements from schema.sql
-  ```
+4. **Database Setup**
+   Create an empty `ecommerce` database in PostgreSQL, then create the tables:
+
+   ```bash
+   npm run migrate -- schema.sql
+   ```
 
 5. **Start the server**
    ```bash
@@ -106,10 +109,8 @@ The API will be available at `http://localhost:3000` (or the port specified in .
 ### Core Dependencies
 - **axios**: HTTP client for making API requests
 - **bcrypt**: Password hashing library
-- **body-parser**: Express middleware for parsing request bodies
 - **cloudinary**: Cloud-based image and video management
 - **country-list**: ISO country data for validation
-- **crypto**: Cryptographic functionality
 - **dotenv**: Environment variable management
 - **express**: Web application framework
 - **jsonwebtoken**: JWT implementation for authentication
@@ -118,7 +119,11 @@ The API will be available at `http://localhost:3000` (or the port specified in .
 - **nodemailer**: Email sending library
 - **pg**: PostgreSQL client for Node.js
 - **swagger-ui-express**: Swagger UI middleware for Express
-- **yamljs**: YAML parser for Swagger documentation
+- **yaml**: YAML parser for Swagger documentation
+- **helmet**: Security headers
+- **cors**: Cross-origin request allowlist
+- **express-rate-limit**: Request rate limiting
+- **zod**: Request validation
 
 ## API Documentation
 
@@ -243,35 +248,50 @@ Content-Type: application/json
 
 ## Error Handling
 
-The API uses consistent error response format:
+Errors share one JSON format:
 
 ```javascript
 {
   "success": false,
-  "error": "Error message here",
-  "statusCode": 400
+  "message": "Error message here"
 }
 ```
 
-<!--## Testing
+Validation failures (400) also list each field:
 
-```bash
-# Run all tests (if test suite is implemented)
-npm test
-
-# Run tests with coverage
-npm run test:coverage
-
-# Run tests in watch mode
-npm run test:watch
+```javascript
+{
+  "success": false,
+  "message": "Validation failed",
+  "errors": [{ "field": "password", "message": "Password is required" }]
+}
 ```
 
-*Note: Add your preferred testing framework (Jest, Mocha, etc.) to package.json if not already included*-->
+Unexpected errors return 500 with a generic message; details go to the server logs only.
 
-### Database Setup with pgAdmin
-1. Open pgAdmin and connect to your PostgreSQL server
-2. Create a new database named `ecommerce`
-3. Execute the SQL commands from schema.sql in pgAdmin to create tables and indexes.
+## Testing
+
+Tests are integration tests that run the real API against a local PostgreSQL database. Paystack, email and Cloudinary are mocked.
+
+1. Create an empty `ecommerce_test` database
+2. Set `TEST_DATABASE_URL` in `.env`. It must point to localhost, because the database is wiped on every run.
+3. Run the tests:
+
+```bash
+npm test
+```
+
+GitHub Actions runs the same tests on every push to `main` and on pull requests.
+
+## Database Migrations
+
+A new database gets everything from `schema.sql`. An existing database needs each file in `migrations/` that it hasn't had yet, run in order:
+
+```bash
+npm run migrate -- migrations/003_allow_multiple_payment_log_entries.sql
+```
+
+Applied migrations aren't tracked, so note which ones each database has.
 
 ## Deployment
 
@@ -282,7 +302,11 @@ NODE_ENV=production
 PORT=3000
 DATABASE_URL=postgresql://username:password@hostname:5432/ecommerce
 JWT_SECRET=your-super-secret-jwt-key
+BASE_URL=https://your-api-domain.com
+CORS_ORIGINS=https://your-frontend-domain.com
 ```
+
+Set the Paystack webhook URL to `https://your-api-domain.com/v1/payments/webhook`. Set `TRUST_PROXY_HOPS` to the number of proxies in front of the app, so rate limits apply per client.
 
 ## Contributing
 
@@ -305,7 +329,7 @@ For support, suggestion or feedback, email emmaimade14@gmail.com or create an is
 ### v1.0.0
 - Initial release with core e-commerce functionality
 - User authentication and authorization
-- Product and category management
+- Product management
 - Shopping cart and order processing
 - Payment integration
 

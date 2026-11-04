@@ -16,11 +16,8 @@ export const addToCart = async (req, res, next) => {
         throw new HttpError(404, "Product not found");
       }
 
-      // checks if quantity is less than inventory
-      if (product.rows[0].inventory_qty < quantity) {
-        throw new HttpError(400, "Quantity exceeds available inventory", {
-          available: product.rows[0].inventory_qty,
-        });
+      if (product.rows[0].status !== "active") {
+        throw new HttpError(400, "This product is not available");
       }
 
       // checks if user has a cart already and if not create one
@@ -46,6 +43,16 @@ export const addToCart = async (req, res, next) => {
         "SELECT * FROM cart_items WHERE cart_id = $1 AND product_id = $2",
         [cartId, productId]
       );
+
+      // checks the cart total, including any already in the cart, against inventory
+      const quantityInCart = existingItem.rows[0]?.quantity ?? 0;
+
+      if (quantityInCart + quantity > product.rows[0].inventory_qty) {
+        throw new HttpError(400, "Quantity exceeds available inventory", {
+          available: product.rows[0].inventory_qty,
+          in_cart: quantityInCart,
+        });
+      }
 
       if (existingItem.rows.length > 0) {
         await client.query(

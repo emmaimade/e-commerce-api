@@ -39,6 +39,16 @@ export const updateProfileSchema = z.object({
   email: z.email().optional(),
 });
 
+export const addShippingAddressSchema = z.object({
+  line1: z.string(),
+  line2: z.string().nullish(),
+  city: z.string(),
+  state: z.string().nullish(),
+  postal_code: z.string(),
+  country: z.string(),
+  phone: z.string(),
+});
+
 export const addToCartSchema = z.object({ productId: id, quantity: cartQuantity });
 
 export const updateCartItemSchema = z.object({ quantity: cartQuantity });

@@ -3,6 +3,11 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import db from "../../config/db.js";
 import createTransporter from "../../utils/email.js";
+import { passwordResetEmail } from "../../emails/authEmails.js";
+
+// Reset links are stored hashed, so reading the database doesn't give anyone a usable link
+const hashResetToken = (token) =>
+  crypto.createHash("sha256").update(token).digest("hex");
 
 export const register = async (req, res) => {
   try {
@@ -133,7 +138,7 @@ export const forgotPassword = async (req, res) => {
     // Save token and expiry to database
     await db.query(
       "UPDATE users SET reset_password_token = $1, reset_token_expiry = $2 WHERE email = $3",
-      [resetToken, resetTokenExpiry, email]
+      [hashResetToken(resetToken), resetTokenExpiry, email]
     );
 
     // Create transporter
@@ -147,22 +152,7 @@ export const forgotPassword = async (req, res) => {
       from: `E-commerce API <${process.env.EMAIL_USER}>`,
       to: email,
       subject: "Password Reset Request",
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #333;">Password Reset Request</h2>
-          <p>You requested a password reset for your account.</p>
-          <p>Click the button below to reset your password:</p>
-          <a href="${resetUrl}" 
-             style="background-color: #007bff; color: white; padding: 10px 20px; 
-                    text-decoration: none; border-radius: 5px; display: inline-block;">
-            Reset Password
-          </a>
-          <p>Or copy and paste this link into your browser:</p>
-          <p>${resetUrl}</p>
-          <p>This link will expire in 15 minutes.</p>
-          <p>If you didn't request this, please ignore this email.</p>
-        </div>
-      `
+      html: passwordResetEmail({ resetUrl })
     };
 
     // Send email
@@ -235,7 +225,7 @@ export const resetPassword = async (req, res) => {
     // Find user by token and check expiry
     const user = await db.query(
       "SELECT * FROM users WHERE reset_password_token = $1 AND reset_token_expiry > NOW()",
-      [token]
+      [hashResetToken(token)]
     );
 
     if (user.rows.length === 0) {

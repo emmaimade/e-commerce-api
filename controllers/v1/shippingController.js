@@ -1,7 +1,7 @@
 import db from '../../config/db.js';
 import { FOREIGN_KEY_VIOLATION } from '../../utils/validators.js';
 import parsePhoneNumber from 'libphonenumber-js';
-import { getCode, getData, getNameList } from 'country-list';
+import { getCode } from 'country-list';
 
 export const addShippingAddress = async (req, res) => {
     try {

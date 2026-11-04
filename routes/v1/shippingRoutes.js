@@ -8,7 +8,8 @@ import {
 } from "../../controllers/v1/shippingController.js";
 import { auth } from '../../middleware/auth.js';
 
-import { validateUuidParam } from '../../middleware/validate.js';
+import { validate, validateUuidParam } from '../../middleware/validate.js';
+import { addShippingAddressSchema } from '../../utils/schemas.js';
 
 const router = express.Router();
 
@@ -16,7 +17,7 @@ router.param('id', validateUuidParam);
 
 router.get('/', auth, getUserShippingAddresses);
 router.get('/:id', auth, getShippingAddress);
-router.post('/', auth, addShippingAddress);
+router.post('/', auth, validate({ body: addShippingAddressSchema }), addShippingAddress);
 router.patch('/:id', auth, updateShippingAddress);
 router.delete('/:id', auth, deleteShippingAddress);
 

@@ -1,20 +1,23 @@
 import express from "express";
 import { adminAuth } from "../../middleware/auth.js";
+import { adminGetUser, adminGetUsers } from "../../controllers/v1/adminUserController.js";
 import {
-  adminGetUser,
-  adminGetUsers,
+  addProduct,
+  updateProduct,
+  deleteProductImage,
+  deleteProduct,
+} from "../../controllers/v1/adminProductController.js";
+import {
   getOrderAdmin,
   getOrdersAdmin,
   verifyPaymentAdmin,
   updateOrderStatus,
+} from "../../controllers/v1/adminOrderController.js";
+import {
   getPaymentStatusAdmin,
   getPaymentLogs,
   getPaymentAnalytics,
-  addProduct,
-  updateProduct,
-  deleteProductImage,
-  deleteProduct
-} from "../../controllers/v1/adminController.js";
+} from "../../controllers/v1/adminPaymentController.js";
 import {
   getProducts,
   getProduct,
