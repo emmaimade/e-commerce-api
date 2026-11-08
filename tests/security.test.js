@@ -6,7 +6,13 @@ import request from "supertest";
 import app from "../app.js";
 import jwt from "jsonwebtoken";
 import { sslConfig } from "../config/db.js";
-import { db, resetDatabase, clearTables, closeDatabase, createUser } from "./helpers/db.js";
+import {
+  db,
+  resetDatabase,
+  clearTables,
+  closeDatabase,
+  createUser,
+} from "./helpers/db.js";
 import { mockEmail, signedWebhook, restoreMocks } from "./helpers/mocks.js";
 
 after(closeDatabase);
@@ -34,10 +40,17 @@ describe("security headers", () => {
   });
 
   it("allows only configured origins across sites", async () => {
-    const allowed = await request(app).get("/health").set("Origin", "https://shop.test");
-    const blocked = await request(app).get("/health").set("Origin", "https://evil.test");
+    const allowed = await request(app)
+      .get("/health")
+      .set("Origin", "https://shop.test");
+    const blocked = await request(app)
+      .get("/health")
+      .set("Origin", "https://evil.test");
 
-    assert.equal(allowed.headers["access-control-allow-origin"], "https://shop.test");
+    assert.equal(
+      allowed.headers["access-control-allow-origin"],
+      "https://shop.test",
+    );
     assert.equal(blocked.headers["access-control-allow-origin"], undefined);
   });
 });
@@ -74,14 +87,39 @@ describe("account privacy", () => {
     await register();
     const sent = mockEmail();
 
-    const unknown = await request(app).post("/v1/auth/forgot-password").set("X-Forwarded-For", newClientIp()).send({ email: "unknown@test.com" });
-    const known = await request(app).post("/v1/auth/forgot-password").set("X-Forwarded-For", newClientIp()).send({ email: "known@test.com" });
+    const unknown = await request(app)
+      .post("/v1/auth/forgot-password")
+      .set("X-Forwarded-For", newClientIp())
+      .send({ email: "unknown@test.com" });
+    const known = await request(app)
+      .post("/v1/auth/forgot-password")
+      .set("X-Forwarded-For", newClientIp())
+      .send({ email: "known@test.com" });
 
     assert.equal(unknown.status, 200);
     assert.equal(known.status, 200);
     assert.deepEqual(unknown.body, known.body);
     assert.equal(sent.length, 1);
     assert.equal(sent[0].to, "known@test.com");
+  });
+
+  it("requires a fresh verification after the profile email changes", async () => {
+    const user = await createUser();
+    const sent = mockEmail();
+    await db.query("UPDATE users SET email_verified = true WHERE id = $1", [
+      user.id,
+    ]);
+
+    const res = await request(app)
+      .patch("/v1/user/updateprofile")
+      .set("Authorization", `Bearer ${user.token}`)
+      .send({ email: "new-email@test.com" });
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.user.email, "new-email@test.com");
+    assert.equal(res.body.user.email_verified, false);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].to, "new-email@test.com");
   });
 
   it("doesn't reveal a mail failure to the client", async () => {
@@ -95,7 +133,10 @@ describe("account privacy", () => {
     console.error = () => {};
 
     try {
-      const res = await request(app).post("/v1/auth/forgot-password").set("X-Forwarded-For", newClientIp()).send({ email: "known@test.com" });
+      const res = await request(app)
+        .post("/v1/auth/forgot-password")
+        .set("X-Forwarded-For", newClientIp())
+        .send({ email: "known@test.com" });
 
       assert.equal(res.status, 200);
     } finally {
@@ -110,13 +151,19 @@ describe("token revocation", () => {
   afterEach(restoreMocks);
 
   const profile = (token) =>
-    request(app).get("/v1/user/profile").set("Authorization", `Bearer ${token}`);
+    request(app)
+      .get("/v1/user/profile")
+      .set("Authorization", `Bearer ${token}`);
 
   const registerAndLogin = async () => {
     const credentials = { email: "person@test.com", password: "secret123" };
     await request(app)
       .post("/v1/auth/register")
-      .send({ name: "Person", ...credentials, confirmPassword: credentials.password });
+      .send({
+        name: "Person",
+        ...credentials,
+        confirmPassword: credentials.password,
+      });
     await db.query("UPDATE users SET email_verified = true");
     const login = await request(app).post("/v1/auth/login").send(credentials);
     return login.body.token;
@@ -126,7 +173,9 @@ describe("token revocation", () => {
     const token = await registerAndLogin();
     assert.equal((await profile(token)).status, 200);
 
-    const logout = await request(app).post("/v1/auth/logout").set("Authorization", `Bearer ${token}`);
+    const logout = await request(app)
+      .post("/v1/auth/logout")
+      .set("Authorization", `Bearer ${token}`);
 
     assert.equal(logout.status, 200);
     assert.equal((await profile(token)).status, 401);
@@ -135,7 +184,10 @@ describe("token revocation", () => {
   it("revokes existing tokens when the password is reset", async () => {
     const token = await registerAndLogin();
     const sent = mockEmail();
-    await request(app).post("/v1/auth/forgot-password").set("X-Forwarded-For", newClientIp()).send({ email: "person@test.com" });
+    await request(app)
+      .post("/v1/auth/forgot-password")
+      .set("X-Forwarded-For", newClientIp())
+      .send({ email: "person@test.com" });
     const resetToken = sent[0].html.match(/reset-password\/([0-9a-f]+)/)[1];
 
     await request(app)
@@ -148,10 +200,14 @@ describe("token revocation", () => {
   it("removes admin access as soon as the role changes", async () => {
     const admin = await createUser({ role: "admin" });
     const users = () =>
-      request(app).get("/v1/admin/users").set("Authorization", `Bearer ${admin.token}`);
+      request(app)
+        .get("/v1/admin/users")
+        .set("Authorization", `Bearer ${admin.token}`);
     assert.equal((await users()).status, 200);
 
-    await db.query("UPDATE users SET role = 'customer' WHERE id = $1", [admin.id]);
+    await db.query("UPDATE users SET role = 'customer' WHERE id = $1", [
+      admin.id,
+    ]);
 
     assert.equal((await users()).status, 403);
   });
@@ -168,7 +224,9 @@ describe("token revocation", () => {
     const user = await createUser();
     const claims = { id: user.id, role: "admin", email: user.email };
     const wrongSecret = jwt.sign(claims, "not-the-secret");
-    const hs512 = jwt.sign(claims, process.env.JWT_SECRET, { algorithm: "HS512" });
+    const hs512 = jwt.sign(claims, process.env.JWT_SECRET, {
+      algorithm: "HS512",
+    });
     const unsigned = jwt.sign(claims, "", { algorithm: "none" });
 
     for (const token of [wrongSecret, hs512, unsigned]) {
@@ -181,7 +239,9 @@ describe("webhook verification", () => {
   before(resetDatabase);
 
   const post = (body, signature) => {
-    const req = request(app).post("/v1/payments/webhook").set("Content-Type", "application/json");
+    const req = request(app)
+      .post("/v1/payments/webhook")
+      .set("Content-Type", "application/json");
     if (signature !== undefined) req.set("x-paystack-signature", signature);
     return req.send(body);
   };
@@ -203,7 +263,10 @@ describe("webhook verification", () => {
 
       assert.equal(unsigned.status, 400);
       assert.equal(unsigned.body.message, "Invalid signature");
-      assert.equal(logged.some((line) => line.includes("private.test")), false);
+      assert.equal(
+        logged.some((line) => line.includes("private.test")),
+        false,
+      );
     } finally {
       console.log = originalLog;
     }
@@ -244,13 +307,19 @@ describe("password reset tokens", () => {
 
   const requestToken = async (user) => {
     const sent = mockEmail();
-    await request(app).post("/v1/auth/forgot-password").set("X-Forwarded-For", newClientIp()).send({ email: user.email });
+    await request(app)
+      .post("/v1/auth/forgot-password")
+      .set("X-Forwarded-For", newClientIp())
+      .send({ email: user.email });
     return sent[0].html.match(/reset-password\/([0-9a-f]+)/)[1];
   };
 
   const storedToken = async (user) =>
-    (await db.query("SELECT reset_password_token FROM users WHERE id = $1", [user.id])).rows[0]
-      .reset_password_token;
+    (
+      await db.query("SELECT reset_password_token FROM users WHERE id = $1", [
+        user.id,
+      ])
+    ).rows[0].reset_password_token;
 
   it("stores a hash, so a database leak doesn't expose usable links", async () => {
     const user = await createUser();
@@ -259,7 +328,10 @@ describe("password reset tokens", () => {
 
     const stored = await storedToken(user);
     assert.notEqual(stored, token);
-    assert.equal(stored, crypto.createHash("sha256").update(token).digest("hex"));
+    assert.equal(
+      stored,
+      crypto.createHash("sha256").update(token).digest("hex"),
+    );
   });
 
   it("rejects the stored hash when used as a token", async () => {
@@ -275,7 +347,7 @@ describe("password reset tokens", () => {
 
   it("stores the expiry with a time zone", async () => {
     const column = await db.query(
-      "SELECT data_type FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'reset_token_expiry'"
+      "SELECT data_type FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'reset_token_expiry'",
     );
 
     assert.equal(column.rows[0].data_type, "timestamp with time zone");
@@ -284,7 +356,10 @@ describe("password reset tokens", () => {
   it("rejects an expired token", async () => {
     const user = await createUser();
     const token = await requestToken(user);
-    await db.query("UPDATE users SET reset_token_expiry = now() - interval '1 hour' WHERE id = $1", [user.id]);
+    await db.query(
+      "UPDATE users SET reset_token_expiry = now() - interval '1 hour' WHERE id = $1",
+      [user.id],
+    );
 
     const res = await request(app)
       .post(`/v1/auth/reset-password/${token}`)
